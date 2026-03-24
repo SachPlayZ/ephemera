@@ -1,0 +1,26 @@
+{
+  "name": "ephemera",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ephemeral Proof of Health — Privacy-preserving ZK health badges",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "backend:dev": "pnpm --filter backend dev",
+    "frontend:dev": "pnpm --filter frontend dev",
+    "test:circuits": "cd circuits/epoh_badge && nargo test",
+    "test:contracts": "cd contracts && forge test",
+    "test:backend": "pnpm --filter backend test",
+    "test:frontend": "pnpm --filter frontend test"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "dependencies": {
+    "@aztec/bb.js": "^4.1.0",
+    "@noble/curves": "^2.0.1",
+    "@noble/secp256k1": "^1.7.2",
+    "@noir-lang/noir_js": "^1.0.0-beta.19",
+    "viem": "^2.47.6"
+  }
+}
