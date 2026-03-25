@@ -10,84 +10,112 @@
 
 ## Claim Structure
 
-A health claim is the raw data signed by an issuer (hospital, lab, oracle) and provided to the ZK circuit as private input.
+A health claim is the data provided by an issuer and passed to the Compact circuit for ZK proof generation.
 
-```
-HealthClaim {
-    claim_type:       u8          // 0, 1, or 2
-    subject_address:  [u8; 20]    // Ethereum address of the badge recipient
-    issued_at:        u64         // Unix timestamp of issuance
-    expires_at:       u64         // Unix timestamp of expiry
+```typescript
+interface ClaimData {
+  claimType: number;      // 0, 1, or 2
+  subjectAddress: string; // 32-byte hex identifier for the subject
+  issuedAt: bigint;       // Unix timestamp of issuance
+  expiresAt: bigint;      // Unix timestamp of expiry
 }
 ```
 
-The issuer signs `keccak256(abi.encodePacked(claim_type, subject_address, issued_at, expires_at))` using their secp256k1 private key (standard Ethereum signature).
+The issuer holds a 32-byte secret key. Identity is proven by passing the secret key as a **witness** to the Compact circuit, which derives the public key via `persistentHash` and checks it against the on-ledger issuer registry.
 
 ## Circuit Inputs
 
-### Private Inputs (witness — known only to prover)
+### Private Inputs (witnesses — known only to prover)
 
 | Name | Type | Description |
 |------|------|-------------|
-| `claim_type` | `u8` | Health claim type enum |
-| `subject_address` | `[u8; 20]` | Ethereum address of subject |
-| `issued_at` | `u64` | Issuance timestamp |
-| `expires_at` | `u64` | Expiry timestamp |
-| `issuer_pubkey_x` | `[u8; 32]` | Issuer's secp256k1 public key X coordinate |
-| `issuer_pubkey_y` | `[u8; 32]` | Issuer's secp256k1 public key Y coordinate |
-| `signature` | `[u8; 64]` | ECDSA signature (r, s) over the hashed message |
-| `hashed_message` | `[u8; 32]` | keccak256 hash of the encoded claim data |
+| `ownerSecretKey` | `Bytes<32>` | Owner's secret key (for addIssuer/revokeBadge) |
+| `issuerSecretKey` | `Bytes<32>` | Issuer's secret key (for mintBadge) |
 
-### Public Outputs (revealed to verifier)
+### Circuit Parameters
 
 | Name | Type | Description |
 |------|------|-------------|
-| `claim_type` | `u8` | Which health status is being claimed |
-| `expires_at` | `u64` | When the badge expires (checked on-chain) |
-| `subject_hash` | `Field` | Poseidon2 hash of subject_address (privacy-preserving identity binding) |
-| `issuer_pubkey_hash` | `Field` | Poseidon2 hash of issuer public key (checked against IssuerRegistry) |
+| `claim_type` | `Uint<8>` | Health claim type enum (0-2) |
+| `subject_address` | `Bytes<32>` | Subject's address (hashed on-chain) |
+| `issued_at` | `Uint<64>` | Issuance timestamp |
+| `expires_at` | `Uint<64>` | Expiry timestamp |
+
+### Public Outputs (stored on ledger via `disclose()`)
+
+| Name | Type | Description |
+|------|------|-------------|
+| `last_badge_claim_type` | `Uint<8>` | Which health status is being claimed |
+| `last_badge_expires_at` | `Uint<64>` | When the badge expires |
+| `last_badge_subject_hash` | `Bytes<32>` | persistentHash of subject address |
+| `last_badge_issuer_hash` | `Bytes<32>` | Derived public key of the issuer |
+| `last_badge_state` | `BadgeState` | EMPTY, ACTIVE, or REVOKED |
 
 ## Circuit Constraints
 
-### C1: Valid Issuer Signature
-```
-ecdsa_secp256k1::verify_signature(issuer_pubkey_x, issuer_pubkey_y, signature, hashed_message) == true
-```
-Proves the claim was signed by the issuer's private key without revealing the key.
-
-### C2: Issuer Public Key Hash
-```
-issuer_pubkey_hash == Poseidon2(issuer_pubkey_x || issuer_pubkey_y)
-```
-Outputs a deterministic hash of the issuer's public key. The on-chain IssuerRegistry checks this hash is whitelisted, without the circuit revealing the full public key.
-
-### C3: Subject Identity Binding
-```
-subject_hash == Poseidon2(subject_address)
-```
-Binds the badge to the subject's wallet address without revealing it on-chain. The smart contract additionally checks `subject_hash == Poseidon2(msg.sender)` at mint time.
-
-### C4: Expiry Sanity Check
-```
-expires_at > issued_at
-```
-Prevents nonsensical claims where expiry precedes issuance. Actual expiry enforcement is on-chain via `block.timestamp`.
-
-### C5: Valid Claim Type
-```
-claim_type <= 2
+### C1: Valid Claim Type
+```compact
+assert(claim_type <= 2, "Invalid claim type");
 ```
 Ensures the claim type is within the defined enum range.
+
+### C2: Expiry Sanity Check
+```compact
+assert(expires_at > issued_at, "Expiry must be after issuance");
+```
+Prevents nonsensical claims where expiry precedes issuance.
+
+### C3: Issuer Authorization
+```compact
+const isk = issuerSecretKey();
+const issuer_pk = derivePublicKey(isk, round as Field as Bytes<32>);
+const m0 = (issuer_0 == issuer_pk) as Uint<8>;
+const m1 = (issuer_1 == issuer_pk) as Uint<8>;
+const m2 = (issuer_2 == issuer_pk) as Uint<8>;
+const m3 = (issuer_3 == issuer_pk) as Uint<8>;
+assert(m0 + m1 + m2 + m3 > 0, "Issuer not registered");
+```
+Proves the issuer is registered without revealing which slot matched. Uses arithmetic sum instead of short-circuit OR to prevent witness-value disclosure through conditional branches.
+
+### C4: Subject Identity Binding
+```compact
+const subject_hash = hashSubject(subject_address);
+last_badge_subject_hash = disclose(subject_hash);
+```
+Binds the badge to the subject's address via a privacy-preserving hash.
+
+### C5: Issuer Identity Binding
+```compact
+last_badge_issuer_hash = disclose(issuer_pk);
+```
+The derived public key (not the secret key) is disclosed to the ledger.
 
 ## Proof Flow
 
 ```
-1. Issuer signs claim off-chain (standard Ethereum signature)
-2. User receives signed claim (encrypted, stored on IPFS)
-3. User provides claim + signature as private inputs to circuit
-4. Circuit verifies all 5 constraints
-5. Circuit outputs: claim_type, expires_at, subject_hash, issuer_pubkey_hash
-6. Proof submitted to EPoHBadge contract on-chain
-7. Contract verifies proof, checks issuer_pubkey_hash in registry, checks expiry
-8. Soulbound badge minted to user
+1. Issuer creates a signed claim with their secret key
+2. Backend stores claim, returns claimId
+3. User requests proof generation via POST /generate-proof
+4. Backend calls the Compact mintBadge circuit:
+   a. Issuer secret key provided as witness
+   b. Circuit derives issuer public key via persistentHash
+   c. Circuit checks issuer PK against registered issuers (arithmetic sum)
+   d. Circuit computes subject hash via persistentHash
+   e. All constraints verified
+5. Midnight Proof Server generates the ZK proof
+6. Wallet SDK submits the proven transaction to the Midnight node
+7. Ledger state updated with badge data
+8. Third parties verify badge validity via ledger state query
 ```
+
+## Key Differences from EVM/Noir Approach
+
+| Aspect | Old (Noir/Solidity) | New (Compact/Midnight) |
+|--------|-------------------|----------------------|
+| Proof system | UltraHonk (Barretenberg) | Midnight Proof Server |
+| Signature scheme | ECDSA secp256k1 | Hash-based key derivation |
+| Contract language | Solidity (3 contracts) | Compact (1 contract) |
+| On-chain state | ERC-721 mappings | Compact ledger fields |
+| Issuer check | On-chain registry lookup | In-circuit arithmetic verification |
+| Privacy model | Public inputs/outputs | `disclose()` for public, witnesses for private |
+| Proof generation | Browser WASM (bb.js) | Server-side (Midnight Proof Server) |

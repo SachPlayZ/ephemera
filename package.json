@@ -2,7 +2,7 @@
   "name": "ephemera",
   "version": "0.1.0",
   "private": true,
-  "description": "Ephemeral Proof of Health — Privacy-preserving ZK health badges",
+  "description": "Ephemeral Proof of Health — Privacy-preserving ZK health badges on Midnight",
   "workspaces": [
     "backend",
     "frontend"
@@ -10,17 +10,25 @@
   "scripts": {
     "backend:dev": "pnpm --filter backend dev",
     "frontend:dev": "pnpm --filter frontend dev",
-    "test:circuits": "cd circuits/epoh_badge && nargo test",
-    "test:contracts": "cd contracts && forge test",
+    "compact:compile": "compact compile contracts/epoh_badge.compact contracts/managed/epoh_badge",
+    "midnight:up": "docker compose -f docker-compose.yml up -d",
+    "midnight:down": "docker compose -f docker-compose.yml down",
+    "midnight:logs": "docker compose -f docker-compose.yml logs -f",
     "test:backend": "pnpm --filter backend test",
     "test:frontend": "pnpm --filter frontend test"
   },
   "packageManager": "pnpm@9.15.0",
   "dependencies": {
-    "@aztec/bb.js": "^4.1.0",
-    "@noble/curves": "^2.0.1",
-    "@noble/secp256k1": "^1.7.2",
-    "@noir-lang/noir_js": "^1.0.0-beta.19",
-    "viem": "^2.47.6"
+    "@midnight-ntwrk/compact-runtime": "^0.15.0",
+    "@midnight-ntwrk/onchain-runtime-v3": "^3.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@midnight-ntwrk/wallet-sdk-shielded": "2.0.0",
+      "@midnight-ntwrk/wallet-sdk-unshielded-wallet": "2.0.0",
+      "@midnight-ntwrk/wallet-sdk-dust-wallet": "2.0.0",
+      "@midnight-ntwrk/wallet-sdk-facade": "2.0.0",
+      "@midnight-ntwrk/wallet-sdk-capabilities": "3.1.0"
+    }
   }
 }

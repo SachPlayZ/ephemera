@@ -1,52 +1,34 @@
 /**
- * Issuer Service — Signs health claims using ECDSA secp256k1.
+ * Issuer Service — Manages issuer identity for Midnight Compact contracts.
  *
- * Uses @noble/secp256k1 v1 for Noir-compatible signatures.
- * The message hash is keccak256(abi.encodePacked(claimType, subjectAddress, issuedAt, expiresAt)).
+ * Instead of ECDSA signatures (EVM pattern), Midnight uses hash-based
+ * key derivation. The issuer proves identity by providing their secret key
+ * as a witness — the Compact circuit derives the public key via
+ * persistentHash and checks it against the on-ledger issuer registry.
  */
-import * as secp from "@noble/secp256k1";
-import {
-  keccak256,
-  encodePacked,
-  hexToBytes,
-  type Hex,
-  type Address,
-} from "viem";
 
 export interface ClaimData {
   claimType: number; // 0=VACCINATED, 1=TEST_NEGATIVE, 2=MEDICALLY_FIT
-  subjectAddress: Address;
+  subjectAddress: string; // 32-byte hex identifier for the subject
   issuedAt: bigint;
   expiresAt: bigint;
 }
 
 export interface SignedClaim {
   claim: ClaimData;
-  issuerPubkeyX: Uint8Array;
-  issuerPubkeyY: Uint8Array;
-  signature: Uint8Array; // 64 bytes, compact (r||s)
-  hashedMessage: Uint8Array; // 32 bytes, keccak256
+  issuerSecretKey: Uint8Array; // 32 bytes — passed as witness to Compact circuit
 }
 
 export class IssuerService {
-  private privateKey: string;
-  private pubkeyX: Uint8Array;
-  private pubkeyY: Uint8Array;
+  private secretKey: Uint8Array;
 
-  constructor(privateKeyHex: string) {
-    // Strip 0x prefix if present
-    this.privateKey = privateKeyHex.replace(/^0x/, "");
-    const pubKey = secp.getPublicKey(this.privateKey, false); // uncompressed
-    this.pubkeyX = pubKey.slice(1, 33);
-    this.pubkeyY = pubKey.slice(33, 65);
+  constructor(secretKeyHex: string) {
+    const clean = secretKeyHex.replace(/^0x/, "");
+    this.secretKey = hexToBytes(clean);
   }
 
-  get publicKeyX(): Uint8Array {
-    return this.pubkeyX;
-  }
-
-  get publicKeyY(): Uint8Array {
-    return this.pubkeyY;
+  get issuerKey(): Uint8Array {
+    return this.secretKey;
   }
 
   async signClaim(claim: ClaimData): Promise<SignedClaim> {
@@ -58,64 +40,21 @@ export class IssuerService {
       throw new Error("expiresAt must be after issuedAt");
     }
 
-    // Hash: keccak256(abi.encodePacked(uint8, address, uint64, uint64))
-    const messageHash = keccak256(
-      encodePacked(
-        ["uint8", "address", "uint64", "uint64"],
-        [
-          claim.claimType,
-          claim.subjectAddress,
-          claim.issuedAt,
-          claim.expiresAt,
-        ]
-      )
-    );
-    const hashedMessage = hexToBytes(messageHash);
-
-    // Sign with @noble/secp256k1 v1 (returns DER)
-    const sigDER = await secp.sign(hashedMessage, this.privateKey, {
-      canonical: true,
-    });
-
-    // Convert DER to compact (r||s) for Noir compatibility
-    const signature = derToCompact(sigDER);
-
+    // In Midnight, the issuer doesn't need to sign with ECDSA.
+    // Instead, the secret key is passed as a witness to the Compact circuit,
+    // which derives the public key via persistentHash and checks it against
+    // the registered issuer list on the ledger.
     return {
       claim,
-      issuerPubkeyX: this.pubkeyX,
-      issuerPubkeyY: this.pubkeyY,
-      signature,
-      hashedMessage,
+      issuerSecretKey: this.secretKey,
     };
   }
 }
 
-/** Convert DER-encoded ECDSA signature to 64-byte compact (r||s) format. */
-function derToCompact(der: Uint8Array): Uint8Array {
-  let offset = 2; // skip 30 <total_len>
-  offset++; // skip 02 (integer tag for r)
-  const rLen = der[offset++];
-  const r = der.slice(offset, offset + rLen);
-  offset += rLen;
-  offset++; // skip 02 (integer tag for s)
-  const sLen = der[offset++];
-  const s = der.slice(offset, offset + sLen);
-
-  const rPadded = new Uint8Array(32);
-  const sPadded = new Uint8Array(32);
-  if (r.length <= 32) {
-    rPadded.set(r, 32 - r.length);
-  } else {
-    rPadded.set(r.slice(r.length - 32));
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
-  if (s.length <= 32) {
-    sPadded.set(s, 32 - s.length);
-  } else {
-    sPadded.set(s.slice(s.length - 32));
-  }
-
-  const compact = new Uint8Array(64);
-  compact.set(rPadded, 0);
-  compact.set(sPadded, 32);
-  return compact;
+  return bytes;
 }

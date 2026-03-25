@@ -9,7 +9,7 @@ interface Badge {
   claimType: number;
   expiresAt: number;
   subjectHash: string;
-  issuerPubkeyHash: string;
+  issuerHash: string;
 }
 
 const CLAIM_ICONS = [Syringe, TestTube, HeartPulse];

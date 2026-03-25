@@ -1,0 +1,171 @@
+pragma language_version 0.22;
+
+import CompactStandardLibrary;
+
+// ============================================================
+// Ephemeral Proof of Health (E-PoH) — Compact Contract
+//
+// Replaces: Noir circuit + Solidity (EPoHBadge, IssuerRegistry, Verifier)
+//
+// All circuit parameters are PRIVATE by default (zero-knowledge).
+// Only values wrapped in disclose() are stored publicly on the ledger.
+//
+// NOTE: Short-circuit operators (||, &&) create conditional branches.
+// To avoid leaking witness/private values through branching, we use
+// arithmetic (Boolean -> Uint casts) for issuer registry checks.
+// ============================================================
+
+export enum ClaimType {
+  VACCINATED,
+  TEST_NEGATIVE,
+  MEDICALLY_FIT
+}
+
+export enum BadgeState {
+  EMPTY,
+  ACTIVE,
+  REVOKED
+}
+
+// --- Public ledger state (visible to all participants) ---
+
+// Contract owner authority (derived public key)
+export ledger authority: Bytes<32>;
+export ledger round: Counter;
+
+// Issuer registry (up to 4 trusted issuers)
+export ledger issuer_0: Bytes<32>;
+export ledger issuer_1: Bytes<32>;
+export ledger issuer_2: Bytes<32>;
+export ledger issuer_3: Bytes<32>;
+export ledger issuer_count: Counter;
+
+// Badge counter
+export ledger badge_count: Counter;
+
+// Latest minted badge (public outputs after ZK verification)
+export ledger last_badge_claim_type: Uint<8>;
+export ledger last_badge_expires_at: Uint<64>;
+export ledger last_badge_subject_hash: Bytes<32>;
+export ledger last_badge_issuer_hash: Bytes<32>;
+export ledger last_badge_state: BadgeState;
+
+// --- Witnesses (private data supplied by TypeScript at runtime) ---
+
+witness ownerSecretKey(): Bytes<32>;
+witness issuerSecretKey(): Bytes<32>;
+
+// --- Pure helper circuits ---
+
+// Derive a public key from a secret key using persistent hash.
+// Follows the bboard pattern: persistentHash([domain, sequence, sk])
+export pure circuit derivePublicKey(sk: Bytes<32>, seq: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>(
+    [pad(32, "ephemera:epoh:pk"), seq, sk]
+  );
+}
+
+// Hash a subject identifier for privacy-preserving storage.
+export pure circuit hashSubject(subject: Bytes<32>): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>(
+    [pad(32, "ephemera:epoh:sub"), subject]
+  );
+}
+
+// --- Constructor ---
+
+constructor(sk: Bytes<32>) {
+  authority = disclose(derivePublicKey(sk, round as Field as Bytes<32>));
+  last_badge_state = BadgeState.EMPTY;
+}
+
+// --- Exported circuits (callable from TypeScript API) ---
+
+// Register a trusted issuer (owner-only).
+// The issuer's derived public key is stored on the ledger.
+// issuer_count is a public ledger value, so branching on it is safe.
+export circuit addIssuer(issuer_pk: Bytes<32>): [] {
+  const sk = ownerSecretKey();
+  const pk = derivePublicKey(sk, round as Field as Bytes<32>);
+  assert(authority == pk, "Not authorized as contract owner");
+
+  assert(issuer_count < 4, "Maximum issuers reached");
+
+  // issuer_count is public ledger state — branching on it is safe
+  if (issuer_count == 0) {
+    issuer_0 = disclose(issuer_pk);
+  }
+  if (issuer_count == 1) {
+    issuer_1 = disclose(issuer_pk);
+  }
+  if (issuer_count == 2) {
+    issuer_2 = disclose(issuer_pk);
+  }
+  if (issuer_count == 3) {
+    issuer_3 = disclose(issuer_pk);
+  }
+
+  issuer_count.increment(1);
+}
+
+// Mint a health badge by proving a valid health claim.
+//
+// All parameters are PRIVATE — the ZK circuit proves:
+//   C1: claim_type is valid (0, 1, or 2)
+//   C2: expires_at > issued_at
+//   C3: issuer is registered (witness provides secret key)
+//   C4: subject hash is correctly derived
+//
+// Only disclosed values are stored publicly on the ledger.
+//
+// IMPORTANT: We use arithmetic (Boolean -> Uint cast + sum) instead of
+// short-circuit || to check issuer registration. This avoids creating
+// conditional branches that would leak which issuer slot matched.
+export circuit mintBadge(
+  claim_type: Uint<8>,
+  subject_address: Bytes<32>,
+  issued_at: Uint<64>,
+  expires_at: Uint<64>
+): [] {
+  // C1: Validate claim type (must be 0, 1, or 2)
+  assert(claim_type <= 2, "Invalid claim type");
+
+  // C2: Verify expiry is after issuance
+  assert(expires_at > issued_at, "Expiry must be after issuance");
+
+  // C3: Verify issuer identity via witness-provided secret key
+  const isk = issuerSecretKey();
+  const issuer_pk = derivePublicKey(isk, round as Field as Bytes<32>);
+
+  // C4: Check issuer is registered — using arithmetic to avoid branching.
+  // Cast each Boolean comparison to Uint, then sum. No short-circuit.
+  const m0 = (issuer_0 == issuer_pk) as Uint<8>;
+  const m1 = (issuer_1 == issuer_pk) as Uint<8>;
+  const m2 = (issuer_2 == issuer_pk) as Uint<8>;
+  const m3 = (issuer_3 == issuer_pk) as Uint<8>;
+  assert(m0 + m1 + m2 + m3 > 0, "Issuer not registered");
+
+  // C5: Hash subject address for privacy
+  const subject_hash = hashSubject(subject_address);
+
+  // Store badge data on public ledger
+  last_badge_claim_type = disclose(claim_type);
+  last_badge_expires_at = disclose(expires_at);
+  last_badge_subject_hash = disclose(subject_hash);
+  last_badge_issuer_hash = disclose(issuer_pk);
+  last_badge_state = BadgeState.ACTIVE;
+  badge_count.increment(1);
+  round.increment(1);
+}
+
+// Revoke the latest badge (owner-only).
+export circuit revokeBadge(): [] {
+  assert(last_badge_state == BadgeState.ACTIVE, "No active badge to revoke");
+
+  const sk = ownerSecretKey();
+  const pk = derivePublicKey(sk, round as Field as Bytes<32>);
+  assert(authority == pk, "Not authorized to revoke");
+
+  last_badge_state = BadgeState.REVOKED;
+  round.increment(1);
+}

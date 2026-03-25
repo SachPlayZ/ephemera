@@ -30,24 +30,15 @@ export async function proofRoutes(app: FastifyInstance) {
     }
 
     const svc = await getProofService();
-    const start = Date.now();
-    const result = await svc.generateProof(signedClaim);
-    const elapsed = Date.now() - start;
+    const result = await svc.generateProofAndMint(signedClaim);
 
     return {
-      proof: toHex(result.proof),
-      publicInputs: result.publicInputs,
-      proofSizeBytes: result.proof.length,
-      generationTimeMs: elapsed,
+      badgeId: result.badgeId.toString(),
+      claimType: result.claimType,
+      expiresAt: Number(result.expiresAt),
+      subjectHash: result.subjectHash,
+      issuerHash: result.issuerHash,
+      proofGenTimeMs: result.proofGenTimeMs,
     };
   });
-}
-
-function toHex(bytes: Uint8Array): string {
-  return (
-    "0x" +
-    Array.from(bytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
-  );
 }

@@ -22,13 +22,21 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 type Step = "select" | "issuing" | "proving" | "done" | "error";
 
+interface BadgeResult {
+  badgeId: string;
+  claimType: number;
+  expiresAt: number;
+  subjectHash: string;
+  issuerHash: string;
+  proofGenTimeMs: number;
+}
+
 export default function RequestPage() {
   const [step, setStep] = useState<Step>("select");
   const [selectedType, setSelectedType] = useState<number | null>(null);
   const [phase, setPhase] = useState("");
   const [error, setError] = useState("");
-  const [proofHex, setProofHex] = useState("");
-  const [publicInputs, setPublicInputs] = useState<string[]>([]);
+  const [badgeResult, setBadgeResult] = useState<BadgeResult | null>(null);
   const [copied, setCopied] = useState(false);
 
   async function handleRequest() {
@@ -57,9 +65,9 @@ export default function RequestPage() {
 
       const claim = await issueRes.json();
 
-      // Step 2: Generate proof
+      // Step 2: Generate proof & mint badge on Midnight
       setStep("proving");
-      setPhase("Generating zero-knowledge proof...");
+      setPhase("Generating ZK proof on Midnight...");
 
       const proveRes = await fetch(`${API_URL}/generate-proof`, {
         method: "POST",
@@ -71,9 +79,8 @@ export default function RequestPage() {
         throw new Error(`Failed to generate proof: ${proveRes.statusText}`);
       }
 
-      const proof = await proveRes.json();
-      setProofHex(proof.proof);
-      setPublicInputs(proof.publicInputs);
+      const result = await proveRes.json();
+      setBadgeResult(result);
       setStep("done");
       setPhase("");
     } catch (err: any) {
@@ -83,9 +90,11 @@ export default function RequestPage() {
   }
 
   function handleCopy() {
-    navigator.clipboard.writeText(proofHex);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (badgeResult) {
+      navigator.clipboard.writeText(JSON.stringify(badgeResult, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   }
 
   return (
@@ -94,7 +103,7 @@ export default function RequestPage() {
         Request a Badge
       </h1>
       <p className="mb-8 text-sm text-muted">
-        Select your health claim type and generate a zero-knowledge proof.
+        Select your health claim type and mint a privacy-preserving badge on Midnight.
       </p>
 
       {/* Step indicator */}
@@ -149,7 +158,7 @@ export default function RequestPage() {
             disabled={selectedType === null}
             className="w-full cursor-pointer rounded-xl bg-primary px-6 py-3.5 text-base font-bold text-white shadow-lg shadow-primary/25 transition-all hover:bg-primary-light disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
           >
-            Generate Proof
+            Mint Badge on Midnight
           </button>
         </div>
       )}
@@ -161,7 +170,7 @@ export default function RequestPage() {
           <p className="mb-1 text-base font-semibold text-foreground">{phase}</p>
           <p className="text-sm text-muted">
             {step === "proving"
-              ? "This may take a few seconds. Your data stays private."
+              ? "The Midnight proof server is generating your ZK proof."
               : "Contacting the issuer service..."}
           </p>
 
@@ -178,58 +187,60 @@ export default function RequestPage() {
       )}
 
       {/* Success */}
-      {step === "done" && (
+      {step === "done" && badgeResult && (
         <div className="rounded-2xl border border-success/20 bg-success/5 p-6">
           <div className="mb-4 flex items-center gap-3">
             <CheckCircle2 className="h-8 w-8 text-success" />
             <div>
-              <h2 className="text-lg font-bold text-foreground">Proof Generated</h2>
-              <p className="text-sm text-muted">Your zero-knowledge proof is ready.</p>
+              <h2 className="text-lg font-bold text-foreground">Badge Minted</h2>
+              <p className="text-sm text-muted">
+                Your health badge is now on the Midnight ledger.
+                {badgeResult.proofGenTimeMs > 0 && (
+                  <> Proof generated in {badgeResult.proofGenTimeMs}ms.</>
+                )}
+              </p>
             </div>
           </div>
 
-          {/* Public inputs */}
+          {/* Badge details */}
           <div className="mb-4">
             <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
-              Public Outputs
+              Badge Details
             </h3>
             <div className="space-y-1.5">
-              {["Claim Type", "Expires At", "Subject Hash", "Issuer Hash"].map(
-                (label, i) => (
-                  <div key={label} className="flex items-baseline justify-between gap-4 rounded-lg bg-surface px-3 py-2">
-                    <span className="text-xs font-medium text-muted">{label}</span>
-                    <span className="truncate font-mono text-xs text-foreground">
-                      {publicInputs[i] ?? "—"}
-                    </span>
-                  </div>
-                )
-              )}
+              {[
+                ["Badge ID", badgeResult.badgeId],
+                ["Claim Type", CLAIM_TYPES[badgeResult.claimType]?.label ?? "Unknown"],
+                ["Expires At", new Date(badgeResult.expiresAt * 1000).toLocaleString()],
+                ["Subject Hash", badgeResult.subjectHash],
+                ["Issuer Hash", badgeResult.issuerHash],
+              ].map(([label, value]) => (
+                <div key={label} className="flex items-baseline justify-between gap-4 rounded-lg bg-surface px-3 py-2">
+                  <span className="text-xs font-medium text-muted">{label}</span>
+                  <span className="truncate font-mono text-xs text-foreground">
+                    {value ?? "—"}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
 
-          {/* Proof hex */}
-          <div className="mb-4">
-            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">
-              Proof ({Math.floor(proofHex.length / 2)} bytes)
-            </h3>
-            <div className="relative">
-              <pre className="max-h-24 overflow-auto rounded-lg bg-surface p-3 font-mono text-[10px] leading-relaxed text-foreground/60">
-                {proofHex.slice(0, 200)}...
-              </pre>
-              <button
-                onClick={handleCopy}
-                className="absolute right-2 top-2 cursor-pointer rounded-md bg-surface-alt p-1.5 text-muted transition-colors hover:text-foreground"
-                aria-label="Copy proof"
-              >
-                {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
-              </button>
-            </div>
+          {/* Copy badge data */}
+          <div className="mb-4 flex justify-end">
+            <button
+              onClick={handleCopy}
+              className="inline-flex cursor-pointer items-center gap-1.5 rounded-md bg-surface-alt px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:text-foreground"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied ? "Copied" : "Copy Badge Data"}
+            </button>
           </div>
 
           <button
             onClick={() => {
               setStep("select");
               setSelectedType(null);
+              setBadgeResult(null);
             }}
             className="cursor-pointer rounded-lg border border-border bg-surface px-4 py-2 text-sm font-semibold text-foreground transition-all hover:bg-surface-alt"
           >

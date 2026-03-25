@@ -4,12 +4,12 @@ import { IssuerService, type SignedClaim } from "../services/issuer.service.js";
 
 const IssueClaimSchema = z.object({
   claimType: z.number().int().min(0).max(2),
-  subjectAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  subjectAddress: z.string().regex(/^0x[a-fA-F0-9]{1,64}$/),
   issuedAt: z.number().int().positive(),
   expiresAt: z.number().int().positive(),
 });
 
-// In-memory store for signed claims (keyed by hash of claim data)
+// In-memory store for signed claims (keyed by claim ID)
 const claimStore = new Map<string, SignedClaim>();
 
 export async function claimRoutes(app: FastifyInstance) {
@@ -33,7 +33,7 @@ export async function claimRoutes(app: FastifyInstance) {
 
     const signedClaim = await issuer.signClaim({
       claimType,
-      subjectAddress: subjectAddress as `0x${string}`,
+      subjectAddress,
       issuedAt: BigInt(issuedAt),
       expiresAt: BigInt(expiresAt),
     });
@@ -48,8 +48,6 @@ export async function claimRoutes(app: FastifyInstance) {
       subjectAddress,
       issuedAt,
       expiresAt,
-      issuerPubkeyX: toHex(signedClaim.issuerPubkeyX),
-      issuerPubkeyY: toHex(signedClaim.issuerPubkeyY),
     };
   });
 
@@ -71,12 +69,3 @@ export async function claimRoutes(app: FastifyInstance) {
 
 // Export for internal use by proof route
 export { claimStore };
-
-function toHex(bytes: Uint8Array): string {
-  return (
-    "0x" +
-    Array.from(bytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
-  );
-}

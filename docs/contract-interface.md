@@ -1,165 +1,172 @@
-# E-PoH Smart Contract Interface Spec
+# E-PoH Compact Contract Interface
 
 ## Overview
 
-Three contracts deployed on Midnight (EVM-compatible):
+A single Compact contract (`contracts/epoh_badge.compact`) handles all on-chain logic:
+- Issuer registration (ledger-based whitelist)
+- Badge minting with ZK proof verification
+- Badge revocation
+- Hash-based identity derivation (pure circuits)
 
-1. **Verifier.sol** — Auto-generated from Noir circuit via `bb write_solidity_verifier`
-2. **IssuerRegistry.sol** — Whitelist of authorized health claim issuers
-3. **EPoHBadge.sol** — Soulbound NFT with proof-gated minting and auto-expiry
+## Ledger State
 
-## IssuerRegistry
-
-Manages the set of trusted issuer public key hashes.
-
-### Storage
-
-```solidity
-mapping(bytes32 => bool) public issuers;  // issuerPubkeyHash => authorized
+```compact
+export ledger authority: Bytes<32>;            // Owner's public key
+export ledger round: Counter;                  // Rotation counter for key derivation
+export ledger issuer_0: Bytes<32>;             // Issuer slot 0
+export ledger issuer_1: Bytes<32>;             // Issuer slot 1
+export ledger issuer_2: Bytes<32>;             // Issuer slot 2
+export ledger issuer_3: Bytes<32>;             // Issuer slot 3
+export ledger issuer_count: Counter;           // Number of registered issuers
+export ledger badge_count: Counter;            // Total badges minted
+export ledger last_badge_claim_type: Uint<8>;  // Type of most recent badge
+export ledger last_badge_expires_at: Uint<64>; // Expiry of most recent badge
+export ledger last_badge_subject_hash: Bytes<32>;  // Subject hash
+export ledger last_badge_issuer_hash: Bytes<32>;   // Issuer hash
+export ledger last_badge_state: BadgeState;    // EMPTY, ACTIVE, or REVOKED
 ```
 
-### Functions
+## Enums
 
-```solidity
-/// @notice Add a trusted issuer
-/// @param pubkeyHash Poseidon2 hash of the issuer's secp256k1 public key
-function addIssuer(bytes32 pubkeyHash) external onlyOwner;
-
-/// @notice Remove a trusted issuer (revocation)
-/// @param pubkeyHash Poseidon2 hash of the issuer's public key
-function removeIssuer(bytes32 pubkeyHash) external onlyOwner;
-
-/// @notice Check if a pubkey hash belongs to an authorized issuer
-/// @param pubkeyHash Poseidon2 hash to check
-/// @return True if the issuer is authorized
-function isIssuer(bytes32 pubkeyHash) external view returns (bool);
+```compact
+enum ClaimType { VACCINATED, TEST_NEGATIVE, MEDICALLY_FIT }
+enum BadgeState { EMPTY, ACTIVE, REVOKED }
 ```
 
-### Events
+## Witnesses
 
-```solidity
-event IssuerAdded(bytes32 indexed pubkeyHash);
-event IssuerRemoved(bytes32 indexed pubkeyHash);
+```compact
+witness ownerSecretKey(): Bytes<32>;   // Contract owner's secret key
+witness issuerSecretKey(): Bytes<32>;  // Issuer's secret key for badge minting
 ```
 
-## EPoHBadge
+In TypeScript, witnesses are implemented as:
+```typescript
+const witnesses: Witnesses<EPoHPrivateState> = {
+  ownerSecretKey: ({ privateState }) => [privateState, privateState.ownerSecretKey],
+  issuerSecretKey: ({ privateState }) => [privateState, privateState.issuerSecretKey],
+};
+```
 
-Soulbound ERC-721 NFT representing a verified health badge.
+## Circuits
 
-### Storage
+### Constructor
 
-```solidity
-struct Badge {
-    uint8   claimType;         // 0=VACCINATED, 1=TEST_NEGATIVE, 2=MEDICALLY_FIT
-    uint64  expiresAt;         // Unix timestamp
-    bytes32 subjectHash;       // Poseidon2(subject_address)
-    bytes32 issuerPubkeyHash;  // Poseidon2(issuer_pubkey)
-    uint256 mintedAt;          // block.timestamp at mint
+```compact
+constructor(sk: Bytes<32>) {
+  authority = disclose(derivePublicKey(sk, round as Field as Bytes<32>));
+  last_badge_state = BadgeState.EMPTY;
 }
-
-mapping(uint256 => Badge) public badges;   // tokenId => Badge
-uint256 public nextTokenId;
 ```
 
-### Functions
+Deploys the contract with the owner's public key derived from their secret key.
 
-```solidity
-/// @notice Mint a health badge after ZK proof verification
-/// @param proof The UltraPlonk proof bytes
-/// @param publicInputs Array of public outputs from the circuit
-///        [0] = claim_type, [1] = expires_at, [2] = subject_hash, [3] = issuer_pubkey_hash
-/// @return tokenId The minted badge token ID
-/// @dev Reverts if:
-///   - Proof verification fails
-///   - Issuer not in registry
-///   - Badge already expired (expiresAt <= block.timestamp)
-///   - Subject hash doesn't match Poseidon2(msg.sender)
-function mintBadge(
-    bytes calldata proof,
-    bytes32[] calldata publicInputs
-) external returns (uint256 tokenId);
+### addIssuer (owner-only)
 
-/// @notice Check if a badge is currently valid (not expired)
-/// @param tokenId The badge to check
-/// @return True if expiresAt > block.timestamp
-function isValid(uint256 tokenId) external view returns (bool);
-
-/// @notice Get full badge data
-/// @param tokenId The badge to query
-/// @return badge The Badge struct
-function getBadge(uint256 tokenId) external view returns (Badge memory badge);
-
-/// @notice Burn an expired badge (cleanup, callable by badge owner)
-/// @param tokenId The badge to burn
-function burn(uint256 tokenId) external;
+```compact
+export circuit addIssuer(issuer_pk: Bytes<32>): []
 ```
 
-### Events
+- Verifies caller is the owner via `ownerSecretKey` witness
+- Adds the issuer public key to the next available slot (max 4)
+- Increments `issuer_count`
 
-```solidity
-event BadgeMinted(
-    uint256 indexed tokenId,
-    address indexed subject,
-    uint8 claimType,
-    uint64 expiresAt,
-    bytes32 issuerPubkeyHash
+### mintBadge
+
+```compact
+export circuit mintBadge(
+  claim_type: Uint<8>,
+  subject_address: Bytes<32>,
+  issued_at: Uint<64>,
+  expires_at: Uint<64>
+): []
+```
+
+**Constraints enforced in the circuit:**
+1. `claim_type <= 2` — valid claim type
+2. `expires_at > issued_at` — expiry after issuance
+3. Issuer's secret key (witness) derives to a registered public key
+4. Subject hash computed via `hashSubject(subject_address)`
+
+**Issuer verification (privacy-preserving):**
+```compact
+const m0 = (issuer_0 == issuer_pk) as Uint<8>;
+const m1 = (issuer_1 == issuer_pk) as Uint<8>;
+const m2 = (issuer_2 == issuer_pk) as Uint<8>;
+const m3 = (issuer_3 == issuer_pk) as Uint<8>;
+assert(m0 + m1 + m2 + m3 > 0, "Issuer not registered");
+```
+
+Uses arithmetic sum instead of `||` to avoid witness-value disclosure through conditional branches.
+
+### revokeBadge (owner-only)
+
+```compact
+export circuit revokeBadge(): []
+```
+
+- Requires an active badge (`last_badge_state == BadgeState.ACTIVE`)
+- Verifies caller is the owner
+- Sets `last_badge_state = BadgeState.REVOKED`
+
+### Pure Circuits
+
+```compact
+export pure circuit derivePublicKey(sk: Bytes<32>, seq: Bytes<32>): Bytes<32>
+```
+Derives a public key from a secret key and sequence number using:
+```
+persistentHash<Vector<3, Bytes<32>>>(["ephemera:epoh:pk", seq, sk])
+```
+
+```compact
+export pure circuit hashSubject(subject: Bytes<32>): Bytes<32>
+```
+Hashes a subject address using:
+```
+persistentHash<Vector<2, Bytes<32>>>(["ephemera:epoh:sub", subject])
+```
+
+## TypeScript API
+
+After compilation, import the contract:
+
+```typescript
+import {
+  Contract,
+  ledger as readLedger,
+  pureCircuits,
+  BadgeState,
+  type Ledger,
+  type Witnesses,
+} from "../contracts/managed/epoh_badge/contract/index.js";
+```
+
+### Using Pure Circuits (no network)
+
+```typescript
+const publicKey = pureCircuits.derivePublicKey(secretKey, sequenceBytes);
+const subjectHash = pureCircuits.hashSubject(subjectAddress);
+```
+
+### Calling Impure Circuits (requires network)
+
+```typescript
+const context = { currentPrivateState: privateState, ...currentState };
+const { result, proofData } = contract.circuits.mintBadge(
+  context, claimType, subjectAddress, issuedAt, expiresAt
 );
+// Submit via wallet SDK
+const recipe = await wallet.finalizeRecipe(proofData);
+await wallet.submitTransaction(recipe);
 ```
 
-### Soulbound Enforcement
+## Deployment
 
-```solidity
-/// @dev Override ERC-721 _update to block transfers (mint and burn only)
-function _update(
-    address to,
-    uint256 tokenId,
-    address auth
-) internal override returns (address) {
-    address from = _ownerOf(tokenId);
-    // Allow mint (from == address(0)) and burn (to == address(0))
-    if (from != address(0) && to != address(0)) {
-        revert("EPoHBadge: soulbound, non-transferable");
-    }
-    return super._update(to, tokenId, auth);
-}
+```bash
+# Compile the contract
+compact compile contracts/epoh_badge.compact contracts/managed/epoh_badge
+
+# Deploy (initializes wallet, connects to local network)
+pnpm --filter backend exec tsx src/scripts/deploy.ts
 ```
-
-### Mint Flow (pseudocode)
-
-```
-mintBadge(proof, publicInputs):
-    1. verifier.verify(proof, publicInputs)           → revert if invalid
-    2. claimType      = uint8(publicInputs[0])
-    3. expiresAt      = uint64(publicInputs[1])
-    4. subjectHash    = publicInputs[2]
-    5. issuerPubkeyHash = publicInputs[3]
-    6. require(issuerRegistry.isIssuer(issuerPubkeyHash))  → revert if unknown issuer
-    7. require(expiresAt > block.timestamp)                → revert if expired
-    8. require(subjectHash == poseidon2(msg.sender))       → revert if wrong subject
-    9. _mint(msg.sender, nextTokenId)
-   10. badges[nextTokenId] = Badge{...}
-   11. emit BadgeMinted(...)
-   12. return nextTokenId++
-```
-
-## Verifier (auto-generated)
-
-The Solidity verifier is auto-generated by Barretenberg from the compiled Noir circuit. It exposes a single function:
-
-```solidity
-/// @notice Verify an UltraPlonk proof
-/// @param proof The proof bytes
-/// @param publicInputs The public inputs/outputs
-/// @return True if the proof is valid
-function verify(
-    bytes calldata proof,
-    bytes32[] calldata publicInputs
-) external view returns (bool);
-```
-
-## Deployment Order
-
-1. Deploy `Verifier`
-2. Deploy `IssuerRegistry` (owner = deployer)
-3. Deploy `EPoHBadge` (pass Verifier address + IssuerRegistry address)
-4. Call `issuerRegistry.addIssuer(initialIssuerPubkeyHash)`

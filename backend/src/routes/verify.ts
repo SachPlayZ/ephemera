@@ -1,47 +1,50 @@
 import type { FastifyInstance } from "fastify";
-import { ChainService } from "../services/chain.service.js";
-import type { Address } from "viem";
+import { ChainService, BadgeState } from "../services/chain.service.js";
 
 export async function verifyRoutes(app: FastifyInstance) {
   app.get("/verify/:badgeId", async (request, reply) => {
-    const rpcUrl = process.env.RPC_URL;
-    const badgeAddress = process.env.BADGE_ADDRESS as Address | undefined;
-    const registryAddress = process.env.REGISTRY_ADDRESS as Address | undefined;
-
-    if (!rpcUrl || !badgeAddress || !registryAddress) {
-      return reply
-        .status(500)
-        .send({ error: "Chain config not set (RPC_URL, BADGE_ADDRESS, REGISTRY_ADDRESS)" });
-    }
+    const nodeUrl = process.env.MIDNIGHT_NODE_URL ?? "http://127.0.0.1:9944";
+    const indexerUrl = process.env.MIDNIGHT_INDEXER_URL ?? "http://127.0.0.1:8088/api/v3/graphql";
+    const indexerWsUrl = process.env.MIDNIGHT_INDEXER_WS_URL ?? "ws://127.0.0.1:8088/api/v3/graphql/ws";
+    const proofServerUrl = process.env.MIDNIGHT_PROOF_SERVER_URL ?? "http://127.0.0.1:6300";
 
     const { badgeId } = request.params as { badgeId: string };
-    const tokenId = BigInt(badgeId);
 
     const chain = new ChainService({
-      rpcUrl,
-      badgeAddress,
-      registryAddress,
+      nodeUrl,
+      indexerUrl,
+      indexerWsUrl,
+      proofServerUrl,
+      networkId: process.env.MIDNIGHT_NETWORK_ID ?? "undeployed",
     });
 
     try {
-      const [valid, badge] = await Promise.all([
-        chain.isValid(tokenId),
-        chain.getBadge(tokenId),
-      ]);
+      const badge = await chain.getLatestBadge();
+      const valid = await chain.isValid();
 
       const claimLabels = ["VACCINATED", "TEST_NEGATIVE", "MEDICALLY_FIT"];
 
       return {
-        tokenId: badgeId,
+        badgeId,
         valid,
         claimType: badge.claimType,
         claimLabel: claimLabels[badge.claimType] ?? "UNKNOWN",
         expiresAt: Number(badge.expiresAt),
-        subjectHash: badge.subjectHash,
-        issuerPubkeyHash: badge.issuerPubkeyHash,
+        subjectHash: toHex(badge.subjectHash),
+        issuerHash: toHex(badge.issuerHash),
+        state: BadgeState[badge.state],
       };
     } catch (e: any) {
       return reply.status(404).send({ error: "Badge not found", details: e.message });
     }
   });
+}
+
+function toHex(bytes: Uint8Array): string {
+  return (
+    "0x" +
+    Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+  );
 }

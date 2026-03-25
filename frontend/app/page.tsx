@@ -67,13 +67,13 @@ export default function Home() {
                 step: "02",
                 icon: Eye,
                 title: "Generate Proof",
-                desc: "A zero-knowledge proof is generated in your browser. No medical data leaves your device.",
+                desc: "A zero-knowledge proof is generated via the Midnight proof server. No medical data is revealed.",
               },
               {
                 step: "03",
                 icon: QrCode,
                 title: "Mint & Share",
-                desc: "Your soulbound badge is minted on-chain. Share a QR code for instant verification.",
+                desc: "Your badge is minted on the Midnight ledger. Share a QR code for instant verification.",
               },
             ].map((item) => (
               <div
@@ -117,8 +117,8 @@ export default function Home() {
               },
               {
                 icon: Shield,
-                title: "Soulbound NFTs",
-                desc: "Badges are non-transferable and bound to your wallet. No buying or selling credentials.",
+                title: "Soulbound Badges",
+                desc: "Badges are bound to the Midnight ledger and non-transferable. No buying or selling credentials.",
               },
               {
                 icon: QrCode,
@@ -132,8 +132,8 @@ export default function Home() {
               },
               {
                 icon: Eye,
-                title: "Client-Side Proving",
-                desc: "Proofs generated in your browser via WebAssembly. Your data never leaves your device.",
+                title: "Midnight ZK Proofs",
+                desc: "Proofs generated via the Midnight proof server. Your private data stays confidential.",
               },
             ].map((item) => (
               <div

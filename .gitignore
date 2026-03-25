@@ -7,12 +7,15 @@ build/
 .next/
 out/
 
-# Noir artifacts
+# Compact compiler artifacts (generated from .compact source)
+contracts/managed/
+
+# Noir artifacts (legacy, can be removed)
 circuits/**/target/
 circuits/**/*.proof
 circuits/**/*.vk
 
-# Foundry artifacts & dependencies
+# Foundry artifacts (legacy, can be removed)
 contracts/out/
 contracts/cache/
 contracts/broadcast/
@@ -35,6 +38,7 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
 # Coverage
 coverage/

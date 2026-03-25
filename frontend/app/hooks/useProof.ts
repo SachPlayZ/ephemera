@@ -5,8 +5,12 @@ import { useState, useRef, useEffect, useCallback } from "react";
 export type ProofStatus = "idle" | "proving" | "verified" | "error";
 
 interface ProofResult {
-  proof: number[];
-  publicInputs: string[];
+  badgeId: string;
+  claimType: number;
+  expiresAt: number;
+  subjectHash: string;
+  issuerHash: string;
+  proofGenTimeMs: number;
 }
 
 interface UseProofReturn {
@@ -14,7 +18,7 @@ interface UseProofReturn {
   phase: string;
   result: ProofResult | null;
   error: string | null;
-  prove: (circuit: any, inputs: Record<string, any>) => void;
+  prove: (claimId: string) => void;
   reset: () => void;
 }
 
@@ -37,14 +41,18 @@ export function useProof(): UseProofReturn {
         setPhase(e.data.phase);
       } else if (type === "proof-generated") {
         setResult({
-          proof: e.data.proof,
-          publicInputs: e.data.publicInputs,
+          badgeId: e.data.badgeId,
+          claimType: e.data.claimType,
+          expiresAt: e.data.expiresAt,
+          subjectHash: e.data.subjectHash,
+          issuerHash: e.data.issuerHash,
+          proofGenTimeMs: e.data.proofGenTimeMs,
         });
         setStatus("verified");
-        setPhase("Proof generated successfully");
+        setPhase("Badge minted on Midnight ledger");
       } else if (type === "verified") {
         setStatus("verified");
-        setPhase(e.data.valid ? "Proof is valid" : "Proof is invalid");
+        setPhase(e.data.valid ? "Badge is valid" : "Badge is invalid or expired");
       } else if (type === "error") {
         setError(e.data.message);
         setStatus("error");
@@ -62,12 +70,12 @@ export function useProof(): UseProofReturn {
   }, []);
 
   const prove = useCallback(
-    (circuit: any, inputs: Record<string, any>) => {
+    (claimId: string) => {
       setStatus("proving");
       setPhase("Starting...");
       setResult(null);
       setError(null);
-      workerRef.current?.postMessage({ type: "prove", circuit, inputs });
+      workerRef.current?.postMessage({ type: "prove", claimId });
     },
     []
   );

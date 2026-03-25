@@ -1,42 +1,49 @@
 /**
- * Web Worker for ZK proof generation.
- * Runs Barretenberg WASM in a background thread to avoid blocking the UI.
+ * Web Worker for ZK proof generation — Midnight Edition.
+ *
+ * In the Midnight architecture, ZK proof generation is handled by the
+ * proof server (Docker container on port 6300), NOT in the browser.
+ *
+ * The Compact runtime + proof server handle:
+ *   1. Witness execution (private inputs)
+ *   2. Circuit evaluation
+ *   3. ZK proof generation
+ *   4. Transaction submission
+ *
+ * This worker now delegates proof generation to the backend API,
+ * which coordinates with the Midnight proof server.
  */
 
-import { Noir } from "@noir-lang/noir_js";
-import { Barretenberg, UltraHonkBackend } from "@aztec/bb.js";
-
-let noir: Noir | null = null;
-let backend: UltraHonkBackend | null = null;
-let api: InstanceType<typeof Barretenberg> | null = null;
-
-async function init(circuit: any) {
-  if (noir && backend) return;
-  self.postMessage({ type: "status", phase: "Initializing proof system..." });
-  api = await Barretenberg.new();
-  noir = new Noir(circuit);
-  backend = new UltraHonkBackend(circuit.bytecode, api);
-}
+const API_URL = "http://localhost:3001";
 
 self.onmessage = async (e: MessageEvent) => {
-  const { type, circuit, inputs } = e.data;
+  const { type, claimId } = e.data;
 
   if (type === "prove") {
     try {
-      await init(circuit);
+      self.postMessage({ type: "status", phase: "Submitting to Midnight proof server..." });
 
-      self.postMessage({ type: "status", phase: "Generating witness..." });
-      const { witness } = await noir!.execute(inputs);
-
-      self.postMessage({ type: "status", phase: "Generating proof..." });
-      const proof = await backend!.generateProof(witness, {
-        verifierTarget: "evm",
+      const res = await fetch(`${API_URL}/generate-proof`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claimId }),
       });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error ?? `Proof generation failed: ${res.statusText}`);
+      }
+
+      const result = await res.json();
 
       self.postMessage({
         type: "proof-generated",
-        proof: Array.from(proof.proof),
-        publicInputs: proof.publicInputs,
+        badgeId: result.badgeId,
+        claimType: result.claimType,
+        expiresAt: result.expiresAt,
+        subjectHash: result.subjectHash,
+        issuerHash: result.issuerHash,
+        proofGenTimeMs: result.proofGenTimeMs,
       });
     } catch (err: any) {
       self.postMessage({ type: "error", message: err.message ?? String(err) });
@@ -45,20 +52,15 @@ self.onmessage = async (e: MessageEvent) => {
 
   if (type === "verify") {
     try {
-      await init(circuit);
+      self.postMessage({ type: "status", phase: "Verifying badge on Midnight ledger..." });
 
-      self.postMessage({ type: "status", phase: "Verifying proof..." });
-      const vk = await backend!.getVerificationKey({ verifierTarget: "evm" });
-      const isValid = await backend!.verifyProof(
-        {
-          proof: new Uint8Array(e.data.proof),
-          publicInputs: e.data.publicInputs,
-          verificationKey: vk,
-        } as any,
-        { verifierTarget: "evm" }
-      );
+      const res = await fetch(`${API_URL}/verify/${e.data.badgeId}`);
+      if (!res.ok) {
+        throw new Error("Badge not found on ledger");
+      }
 
-      self.postMessage({ type: "verified", valid: isValid });
+      const badge = await res.json();
+      self.postMessage({ type: "verified", valid: badge.valid, badge });
     } catch (err: any) {
       self.postMessage({ type: "error", message: err.message ?? String(err) });
     }

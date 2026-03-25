@@ -19,13 +19,14 @@ const CLAIM_ICONS = [Syringe, TestTube, HeartPulse];
 const CLAIM_LABELS = ["Vaccinated", "Test Negative", "Medically Fit"];
 
 interface BadgeData {
-  tokenId: string;
+  badgeId: string;
   valid: boolean;
   claimType: number;
   claimLabel: string;
   expiresAt: number;
   subjectHash: string;
-  issuerPubkeyHash: string;
+  issuerHash: string;
+  state: string;
 }
 
 // Demo data for when backend is unavailable
@@ -33,13 +34,14 @@ function getDemoBadge(id: string): BadgeData {
   const claimType = Number(id) % 3;
   const expiresAt = Math.floor(Date.now() / 1000) + 86400;
   return {
-    tokenId: id,
+    badgeId: id,
     valid: true,
     claimType,
     claimLabel: CLAIM_LABELS[claimType],
     expiresAt,
     subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerPubkeyHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
+    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
+    state: "ACTIVE",
   };
 }
 
@@ -137,7 +139,7 @@ export default function VerifyPage({ params }: { params: Promise<{ id: string }>
                 Badge ID
               </span>
               <span className="font-mono text-sm font-semibold text-foreground">
-                #{badge.tokenId}
+                #{badge.badgeId}
               </span>
             </div>
 
@@ -171,7 +173,7 @@ export default function VerifyPage({ params }: { params: Promise<{ id: string }>
             <div>
               <p className="mb-1 text-xs text-muted">Issuer Hash</p>
               <p className="truncate rounded-md bg-surface-alt px-2 py-1 font-mono text-[10px] text-foreground/60">
-                {badge.issuerPubkeyHash}
+                {badge.issuerHash}
               </p>
             </div>
           </div>

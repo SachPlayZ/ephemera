@@ -1,6 +1,6 @@
 # E-PoH: Ephemeral Proof of Health
 
-Privacy-preserving zero-knowledge health badges on [Midnight](https://midnight.network) (EVM-compatible). Prove vaccination status, test results, or medical fitness on-chain without revealing any personal medical data.
+Privacy-preserving zero-knowledge health badges on [Midnight](https://midnight.network). Prove vaccination status, test results, or medical fitness on-chain without revealing any personal medical data.
 
 Badges are **soulbound** (non-transferable), **ephemeral** (auto-expire), and **verifiable** by anyone via QR code.
 
@@ -8,21 +8,21 @@ Badges are **soulbound** (non-transferable), **ephemeral** (auto-expire), and **
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌──────────────────┐
-│  Healthcare  │────>│   Backend    │────>│  Noir Circuit    │
-│   Provider   │     │  (Fastify)   │     │  (ZK Proving)    │
-└─────────────┘     └──────┬───────┘     └────────┬─────────┘
+│  Healthcare  │────>│   Backend    │────>│  Compact Circuit  │
+│   Provider   │     │  (Fastify)   │     │  (ZK Proving)     │
+└─────────────┘     └──────┬───────┘     └────────┬──────────┘
                            │                       │
                      issue claim              generate proof
                            │                       │
                     ┌──────▼───────────────────────▼──────┐
-                    │         Midnight Chain (EVM)         │
+                    │         Midnight Network             │
                     │  ┌───────────┐  ┌────────────────┐  │
-                    │  │ Issuer    │  │  EPoH Badge    │  │
-                    │  │ Registry  │  │  (ERC-721)     │  │
-                    │  └───────────┘  └───────┬────────┘  │
-                    │                 ┌───────▼────────┐  │
-                    │                 │ Honk Verifier  │  │
-                    │                 │ (ZK Proof)     │  │
+                    │  │ Issuer    │  │  E-PoH Badge   │  │
+                    │  │ Registry  │  │  (Soulbound)   │  │
+                    │  │ (ledger)  │  └───────┬────────┘  │
+                    │  └───────────┘  ┌───────▼────────┐  │
+                    │                 │  Proof Server   │  │
+                    │                 │  (ZK Proofs)    │  │
                     │                 └────────────────┘  │
                     └─────────────────────────────────────┘
                                       │
@@ -36,55 +36,46 @@ Badges are **soulbound** (non-transferable), **ephemeral** (auto-expire), and **
 
 | Layer | Technology |
 |-------|-----------|
-| ZK Circuits | **Noir** 1.0.0-beta.19 + **Poseidon2** |
-| Proof System | **UltraHonk** (Barretenberg) |
-| Signatures | **ECDSA secp256k1** (Ethereum-native) |
-| Smart Contracts | **Solidity** 0.8.27 + **Foundry** + **OpenZeppelin v5** |
-| Backend | **Node.js** + **TypeScript** + **Fastify** + **viem** |
+| ZK Circuits | **Compact** (Midnight DSL) + **persistentHash** |
+| Proof System | **Midnight Proof Server** (docker, port 6300) |
+| Key Derivation | **Hash-based** (persistentHash, no ECDSA) |
+| Smart Contract | **Compact** 0.22 (compiled to ZK circuits) |
+| Wallet SDK | **Midnight Wallet SDK** v2.0 (HDWallet, Shielded, Dust) |
+| Backend | **Node.js** + **TypeScript** + **Fastify** |
 | Frontend | **Next.js 16** + **Tailwind CSS v4** + **Lucide Icons** |
-| Target Chain | **Midnight** (EVM-compatible) |
+| Target Chain | **Midnight** (privacy-first, ZK-native) |
 
 ## Project Structure
 
 ```
 ephemera/
-├── circuits/                 # Noir ZK circuits
-│   ├── epoh_badge/
-│   │   ├── Nargo.toml
-│   │   ├── Prover.toml       # Test inputs
-│   │   └── src/main.nr       # Core circuit (ECDSA + Poseidon2)
-│   └── scripts/
-│       ├── gen_test_fixtures.mjs   # Generate test data
-│       └── prove.mjs              # JS-based proof generation
-├── contracts/                # Solidity (Foundry)
-│   ├── src/
-│   │   ├── Verifier.sol      # Auto-generated UltraHonk verifier
-│   │   ├── EPoHBadge.sol     # Soulbound ERC-721 + ZK verification
-│   │   └── IssuerRegistry.sol # Trusted issuer whitelist
-│   ├── test/                 # Foundry tests (19 tests)
-│   └── script/
-│       ├── Deploy.s.sol      # Deployment script
-│       └── MintBadge.s.sol   # Badge minting helper
-├── backend/                  # API server
+├── contracts/
+│   ├── epoh_badge.compact      # Compact contract source
+│   └── managed/                # Compiled output (auto-generated)
+│       └── epoh_badge/
+│           ├── contract/       # index.js, index.d.ts (TypeScript API)
+│           ├── keys/           # ZK proving & verifying keys
+│           ├── zkir/           # ZK intermediate representation
+│           └── compiler/       # Compiler metadata
+├── backend/                    # API server
 │   └── src/
-│       ├── index.ts          # Fastify entry
-│       ├── routes/           # /issue-claim, /generate-proof, /verify
-│       ├── services/         # issuer, proof, chain services
-│       └── test/             # E2E tests (3 tests)
-├── frontend/                 # Web app
+│       ├── index.ts            # Fastify entry
+│       ├── routes/             # /issue-claim, /generate-proof, /verify
+│       ├── services/           # chain, issuer, proof services
+│       ├── scripts/            # deploy.ts
+│       └── test/               # E2E tests (3 tests)
+├── frontend/                   # Web app
 │   └── app/
-│       ├── page.tsx          # Landing page
-│       ├── badges/           # Badge dashboard
-│       ├── request/          # Badge request flow
-│       ├── verify/[id]/      # QR verification page
-│       ├── components/       # Navbar, BadgeCard
-│       ├── hooks/            # useProof (Web Worker)
-│       └── lib/              # proof-worker.ts
-└── docs/                     # Design documentation
-    ├── architecture.md
-    ├── proof-schema.md
-    ├── contract-interface.md
-    └── threat-model.md
+│       ├── page.tsx            # Landing page
+│       ├── badges/             # Badge dashboard
+│       ├── request/            # Badge request flow
+│       ├── verify/[id]/        # QR verification page
+│       ├── components/         # Navbar, BadgeCard
+│       ├── hooks/              # useProof
+│       └── lib/                # proof-worker.ts
+├── docker-compose.yml          # Midnight local network
+├── standalone.env              # Indexer config
+└── docs/                       # Design documentation
 ```
 
 ## Prerequisites
@@ -93,8 +84,8 @@ ephemera/
 |------|---------|---------|
 | **Node.js** | >= 20.x | [nodejs.org](https://nodejs.org) |
 | **pnpm** | >= 9.x | `npm install -g pnpm` |
-| **Nargo** (Noir) | 1.0.0-beta.19 | `curl -L https://raw.githubusercontent.com/noir-lang/noirup/refs/heads/main/install | bash && noirup -v 1.0.0-beta.19` |
-| **Foundry** | latest | `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
+| **Docker** | latest | [docker.com](https://docker.com) |
+| **Compact** | 0.30.0 | `compact update 0.30.0` (after installing the CLI) |
 
 ## Quick Start
 
@@ -106,94 +97,45 @@ cd ephemera
 pnpm install
 ```
 
-### 2. Install Foundry Dependencies
+### 2. Start the Midnight Local Network
 
 ```bash
-cd contracts
-forge install foundry-rs/forge-std
-forge install OpenZeppelin/openzeppelin-contracts
-cd ..
+docker compose up -d
 ```
 
-### 3. Compile the Noir Circuit
+This starts three services:
+- **Node** at `http://localhost:9944`
+- **Indexer** at `http://localhost:8088/api/v3/graphql`
+- **Proof Server** at `http://localhost:6300`
+
+Wait for all containers to be healthy:
+```bash
+docker compose ps
+```
+
+### 3. Compile the Compact Contract
 
 ```bash
-cd circuits/epoh_badge
-nargo compile
-nargo test
+pnpm compact:compile
 ```
 
-Expected output:
-```
-[epoh_badge] Compiling...
-[epoh_badge] Testing...
-[pass] test_valid_claim
-[pass] test_invalid_signature
-[pass] test_invalid_claim_type
-[pass] test_expiry_before_issuance
-```
+This compiles `contracts/epoh_badge.compact` and outputs:
+- TypeScript bindings (`contracts/managed/epoh_badge/contract/`)
+- Proving/verifying keys (`contracts/managed/epoh_badge/keys/`)
+- ZK intermediate representation (`contracts/managed/epoh_badge/zkir/`)
 
-### 4. Generate Proof and Solidity Verifier
+### 4. Deploy the Contract
 
 ```bash
-cd ../scripts
-node prove.mjs
+pnpm --filter backend exec tsx src/scripts/deploy.ts
 ```
 
-This will:
-- Generate a UltraHonk proof (~500ms, 8768 bytes)
-- Verify the proof locally
-- Write the Solidity verifier to `contracts/src/Verifier.sol`
+The script derives a wallet from the mnemonic, connects to the local Midnight network, and initializes the contract. Set `MIDNIGHT_MNEMONIC` to use a custom mnemonic.
 
-### 5. Build and Test Contracts
+### 5. Start the Backend
 
 ```bash
-cd ../../contracts
-forge build
-forge test -vvv
-```
-
-Expected: **19 tests passing** (7 IssuerRegistry + 11 EPoHBadge unit + 1 integration with real ZK proof).
-
-### 6. Deploy to Anvil (Local Testnet)
-
-Terminal 1 — Start Anvil:
-```bash
-anvil --code-size-limit 50000
-```
-
-> The `--code-size-limit` flag is needed because the HonkVerifier contract (33KB) exceeds EIP-170's 24KB limit. Midnight and most L2s support larger contracts.
-
-Terminal 2 — Deploy:
-```bash
-cd contracts
-
-# Using Hardhat account #0 as deployer
-DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-INITIAL_ISSUER_HASH=0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112 \
-forge script script/Deploy.s.sol \
-  --rpc-url http://127.0.0.1:8545 \
-  --broadcast \
-  --code-size-limit 50000
-```
-
-Expected output:
-```
-HonkVerifier deployed at: 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
-IssuerRegistry deployed at: 0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0
-EPoHBadge deployed at: 0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9
-Registered initial issuer
-```
-
-### 7. Start the Backend
-
-```bash
-cd ../backend
-
-ISSUER_PRIVATE_KEY=ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-RPC_URL=http://127.0.0.1:8545 \
-BADGE_ADDRESS=0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9 \
-REGISTRY_ADDRESS=0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0 \
+cd backend
 pnpm dev
 ```
 
@@ -210,16 +152,16 @@ curl -X POST http://localhost:3001/issue-claim \
     "expiresAt": 1812016000
   }'
 
-# Generate a ZK proof (uses the claimId from above)
+# Generate a ZK proof and mint badge
 curl -X POST http://localhost:3001/generate-proof \
   -H "Content-Type: application/json" \
   -d '{"claimId": "<claimId-from-above>"}'
 ```
 
-### 8. Start the Frontend
+### 6. Start the Frontend
 
 ```bash
-cd ../frontend
+cd frontend
 pnpm dev
 ```
 
@@ -228,58 +170,40 @@ Open [http://localhost:3000](http://localhost:3000).
 **Pages:**
 - `/` — Landing page
 - `/badges` — Badge dashboard with live countdown timers
-- `/request` — Request a new badge (issue claim + generate proof)
+- `/request` — Request a new badge (issue claim + mint on Midnight)
 - `/verify/0` — Verify a badge via QR code
 
-### 9. Run Backend Tests
+### 7. Run Tests
 
 ```bash
-cd ../backend
-pnpm test
+pnpm test:backend
 ```
 
 Expected: **3 tests passing** (full issue -> prove -> verify pipeline).
 
 ## Running Everything Together
 
-Open 3 terminals:
-
 ```bash
-# Terminal 1: Local blockchain
-anvil --code-size-limit 50000
+# Terminal 1: Start Midnight network
+docker compose up -d
 
 # Terminal 2: Backend API
-cd backend
-ISSUER_PRIVATE_KEY=ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 pnpm dev
+cd backend && pnpm dev
 
 # Terminal 3: Frontend
-cd frontend
-pnpm dev
+cd frontend && pnpm dev
 ```
 
 Then visit [http://localhost:3000](http://localhost:3000).
-
-## All Test Commands
-
-```bash
-# Circuit tests (4 tests)
-pnpm test:circuits
-
-# Contract tests (19 tests)
-pnpm test:contracts
-
-# Backend tests (3 tests)
-pnpm test:backend
-```
 
 ## API Reference
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/issue-claim` | Sign a health claim (requires `ISSUER_PRIVATE_KEY`) |
-| `POST` | `/generate-proof` | Generate ZK proof from a signed claim |
+| `POST` | `/issue-claim` | Sign a health claim (issuer creates a signed claim) |
+| `POST` | `/generate-proof` | Generate ZK proof and mint badge on Midnight |
 | `GET` | `/claim/:claimId` | Retrieve a signed claim |
-| `GET` | `/verify/:badgeId` | Check badge validity on-chain |
+| `GET` | `/verify/:badgeId` | Check badge validity on the Midnight ledger |
 | `GET` | `/health` | Health check |
 
 ### POST /issue-claim
@@ -303,63 +227,71 @@ Claim types: `0` = Vaccinated, `1` = Test Negative, `2` = Medically Fit.
 }
 ```
 
-Returns the ZK proof (~8.7KB), public inputs, and generation time (~500ms).
+Returns the badge ID, claim metadata, and proof generation time.
 
-## Smart Contracts
+## Compact Contract
 
-| Contract | Description | Gas |
-|----------|-------------|-----|
-| `HonkVerifier.sol` | Auto-generated UltraHonk verifier | — |
-| `IssuerRegistry.sol` | Ownable whitelist of issuer pubkey hashes | ~35K (add) |
-| `EPoHBadge.sol` | Soulbound ERC-721 with ZK proof-gated minting | ~3.2M (mint) |
+The contract (`contracts/epoh_badge.compact`) handles all on-chain logic and ZK proof generation in a single file:
 
-### EPoHBadge Public Functions
+| Circuit | Description |
+|---------|-------------|
+| `addIssuer(issuer_pk)` | Register an issuer (owner-only, max 4) |
+| `mintBadge(claim_type, subject, issued_at, expires_at)` | Mint a health badge with ZK proof |
+| `revokeBadge()` | Revoke the active badge (owner-only) |
+| `derivePublicKey(sk, seq)` | Pure circuit: derive public key from secret |
+| `hashSubject(subject)` | Pure circuit: hash a subject address |
 
-- `mintBadge(bytes proof, bytes32[] publicInputs)` — Mint a badge with a valid ZK proof
-- `isValid(uint256 tokenId)` — Check if a badge is still active (not expired)
-- `getBadge(uint256 tokenId)` — Get badge data (claimType, expiresAt, hashes)
-- `burn(uint256 tokenId)` — Burn your own badge
+### Ledger State
 
-## Circuit Details
+| Field | Type | Description |
+|-------|------|-------------|
+| `authority` | `Bytes<32>` | Owner's public key |
+| `issuer_0..3` | `Bytes<32>` | Registered issuer public keys |
+| `issuer_count` | `Counter` | Number of registered issuers |
+| `badge_count` | `Counter` | Total badges minted |
+| `last_badge_state` | `BadgeState` | EMPTY, ACTIVE, or REVOKED |
+| `last_badge_claim_type` | `Uint<8>` | Type of the last badge |
+| `last_badge_expires_at` | `Uint<64>` | Expiry timestamp |
 
-The Noir circuit (`circuits/epoh_badge/src/main.nr`) enforces 5 constraints:
+### Privacy Model
 
-1. **C1**: ECDSA secp256k1 signature is valid over `keccak256(abi.encodePacked(claimType, subject, issuedAt, expiresAt))`
-2. **C2**: `issuerPubkeyHash == Poseidon2(pubkey_x, pubkey_y)`
-3. **C3**: `subjectHash == Poseidon2(subjectAddress)`
-4. **C4**: `expiresAt > issuedAt`
-5. **C5**: `claimType` in `{0, 1, 2}`
-
-**Private inputs**: All claim data, issuer pubkey, signature, message hash.
-**Public outputs**: `claimType`, `expiresAt`, `subjectHash`, `issuerPubkeyHash`.
-
-## Benchmarks
-
-| Metric | Value |
-|--------|-------|
-| Witness generation | ~33ms |
-| Proof generation | ~500ms |
-| Proof verification (off-chain) | ~115ms |
-| Proof size | 8,768 bytes |
-| On-chain verification gas | ~3.2M |
-| Verification key size | 1,888 bytes |
+- **Private inputs**: Issuer secret key, owner secret key (provided as witnesses)
+- **Public outputs**: Claim type, expiry, subject hash, issuer hash, badge state
+- **Key insight**: The Compact circuit proves the issuer is registered *without revealing which issuer* — it uses arithmetic sums instead of short-circuit OR to avoid witness-value disclosure
 
 ## Environment Variables
 
 ```env
 # Backend
-ISSUER_PRIVATE_KEY=       # Issuer's secp256k1 private key (hex, no 0x prefix)
-RPC_URL=                  # Chain RPC URL (default: http://127.0.0.1:8545)
-BADGE_ADDRESS=            # Deployed EPoHBadge contract address
-REGISTRY_ADDRESS=         # Deployed IssuerRegistry contract address
+ISSUER_SECRET_KEY=        # Issuer's secret key (hex, 32 bytes)
+MIDNIGHT_NODE_URL=        # Node URL (default: http://127.0.0.1:9944)
+MIDNIGHT_INDEXER_URL=     # Indexer URL (default: http://127.0.0.1:8088/api/v3/graphql)
+MIDNIGHT_INDEXER_WS=      # Indexer WS (default: ws://127.0.0.1:8088/api/v3/graphql/ws)
+MIDNIGHT_PROOF_SERVER=    # Proof server URL (default: http://127.0.0.1:6300)
+MIDNIGHT_MNEMONIC=        # Wallet mnemonic (24 words)
 PORT=3001                 # Backend port
 
 # Frontend
 NEXT_PUBLIC_API_URL=      # Backend API URL (default: http://localhost:3001)
+```
 
-# Deployment
-DEPLOYER_PRIVATE_KEY=     # Deployer wallet private key
-INITIAL_ISSUER_HASH=      # Optional: register an issuer on deploy
+## Docker Services
+
+| Service | Port | Image |
+|---------|------|-------|
+| Midnight Node | 9944 | `midnightntwrk/midnight-node:0.21.0` |
+| Indexer | 8088 | `midnightntwrk/indexer-standalone:3.1.0` |
+| Proof Server | 6300 | `midnightntwrk/proof-server:7.0.0` |
+
+```bash
+# Start
+docker compose up -d
+
+# Stop
+docker compose down
+
+# Logs
+docker compose logs -f
 ```
 
 ## License

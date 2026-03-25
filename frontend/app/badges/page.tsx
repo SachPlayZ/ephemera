@@ -10,7 +10,7 @@ interface Badge {
   claimType: number;
   expiresAt: number;
   subjectHash: string;
-  issuerPubkeyHash: string;
+  issuerHash: string;
 }
 
 // Demo badges for showcase (in production, fetch from chain)
@@ -20,21 +20,21 @@ const DEMO_BADGES: Badge[] = [
     claimType: 0,
     expiresAt: Math.floor(Date.now() / 1000) + 86400, // 24h from now
     subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerPubkeyHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
+    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
   },
   {
     tokenId: 1,
     claimType: 1,
     expiresAt: Math.floor(Date.now() / 1000) + 3000, // ~50 min (expiring soon)
     subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerPubkeyHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
+    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
   },
   {
     tokenId: 2,
     claimType: 2,
     expiresAt: Math.floor(Date.now() / 1000) - 3600, // expired 1h ago
     subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerPubkeyHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
+    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
   },
 ];
 
