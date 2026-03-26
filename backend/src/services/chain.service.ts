@@ -29,6 +29,11 @@ import {
   UnshieldedWallet,
 } from "@midnight-ntwrk/wallet-sdk-unshielded-wallet";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import {
+  createCircuitContext,
+  type CircuitContext,
+  type CircuitResults,
+} from "@midnight-ntwrk/compact-runtime";
 import * as Rx from "rxjs";
 import { WebSocket } from "ws";
 
@@ -72,6 +77,8 @@ export interface MidnightConfig {
   ownerSecretKey: Uint8Array;
   /** Hex seed for the genesis/master wallet (64 bytes hex) */
   walletSeed?: string;
+  /** Contract address (hex string from deployment) */
+  contractAddress?: string;
 }
 
 const DEFAULT_CONFIG: MidnightConfig = {
@@ -108,6 +115,7 @@ export class ChainService {
   private contract: Contract<EPoHPrivateState> | null = null;
   private walletCtx: WalletContext | null = null;
   private initialized = false;
+  private lastCircuitContext: CircuitContext<EPoHPrivateState> | null = null;
 
   constructor(config?: Partial<MidnightConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -122,7 +130,6 @@ export class ChainService {
     setNetworkId(this.config.networkId);
 
     // Set up the contract with witness implementations
-    const ownerKey = this.config.ownerSecretKey;
     const witnesses: Witnesses<EPoHPrivateState> = {
       ownerSecretKey: ({ privateState }) => {
         return [privateState, privateState.ownerSecretKey];
@@ -140,6 +147,72 @@ export class ChainService {
     }
 
     this.initialized = true;
+  }
+
+  /**
+   * Build a circuit context for executing contract circuits.
+   * Requires a deployed contract address and a synced wallet.
+   */
+  private buildCircuitContext(
+    privateState: EPoHPrivateState,
+    contractState: any,
+  ): CircuitContext<EPoHPrivateState> {
+    if (!this.walletCtx) throw new Error("Wallet not initialized");
+    if (!this.config.contractAddress) throw new Error("Contract address not set");
+
+    return createCircuitContext(
+      this.config.contractAddress,
+      this.walletCtx.shieldedSecretKeys.coinPublicKey,
+      contractState,
+      privateState,
+    );
+  }
+
+  /**
+   * Submit a circuit call result as a transaction to the network.
+   */
+  private async submitCircuitResult(
+    circuitResults: CircuitResults<EPoHPrivateState, any>,
+  ): Promise<string> {
+    if (!this.walletCtx) throw new Error("Wallet not initialized");
+
+    const ttl = new Date(Date.now() + 30 * 60 * 1000);
+
+    // Balance the unproven transaction from proof data
+    const recipe = await this.walletCtx.wallet.balanceUnprovenTransaction(
+      circuitResults.proofData as any,
+      {
+        shieldedSecretKeys: this.walletCtx.shieldedSecretKeys,
+        dustSecretKey: this.walletCtx.dustSecretKey,
+      },
+      { ttl },
+    );
+
+    // Sign and finalize
+    const signed = await this.walletCtx.wallet.signRecipe(
+      recipe,
+      (payload: any) => this.walletCtx!.unshieldedKeystore.signData(payload),
+    );
+    const finalized = await this.walletCtx.wallet.finalizeRecipe(signed);
+    return await this.walletCtx.wallet.submitTransaction(finalized);
+  }
+
+  /**
+   * Query the contract's current on-chain state from the indexer.
+   */
+  async queryContractState(): Promise<any> {
+    if (!this.config.contractAddress) throw new Error("Contract address not set");
+
+    // Query the indexer for the contract's current state
+    const response = await fetch(this.config.indexerUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `query { contractState(address: "${this.config.contractAddress}") { state } }`,
+      }),
+    });
+    const data = await response.json();
+    return data?.data?.contractState?.state;
   }
 
   /**
@@ -260,33 +333,32 @@ export class ChainService {
     const issuedAt = signedClaim.claim.issuedAt;
     const expiresAt = signedClaim.claim.expiresAt;
 
-    // Execute the mintBadge circuit — the proof server generates the ZK proof,
-    // and the wallet SDK submits the proven transaction to the node.
-    //
-    // When connected to a live network with a funded wallet:
-    //
-    // const privateState: EPoHPrivateState = {
-    //   ownerSecretKey: this.config.ownerSecretKey,
-    //   issuerSecretKey: signedClaim.issuerSecretKey,
-    // };
-    //
-    // const currentState = await this.getContractState();
-    // const context = { currentPrivateState: privateState, ...currentState };
-    //
-    // const { result, context: newCtx, proofData } =
-    //   this.contract!.circuits.mintBadge(
-    //     context, claimType, subjectAddress, issuedAt, expiresAt
-    //   );
-    //
-    // if (this.walletCtx) {
-    //   const recipe = await this.walletCtx.wallet.finalizeRecipe(proofData);
-    //   await this.walletCtx.wallet.submitTransaction(recipe);
-    // }
+    const privateState: EPoHPrivateState = {
+      ownerSecretKey: this.config.ownerSecretKey,
+      issuerSecretKey: signedClaim.issuerSecretKey,
+    };
+
+    const contractState = await this.queryContractState();
+    const context = this.buildCircuitContext(privateState, contractState);
+
+    const circuitResults = this.contract!.circuits.mintBadge(
+      context, claimType, subjectAddress, issuedAt, expiresAt,
+    );
+
+    // Update cached context for subsequent calls
+    this.lastCircuitContext = circuitResults.context;
+
+    const txId = await this.submitCircuitResult(circuitResults);
+    console.log(`  mintBadge tx submitted: ${txId}`);
 
     const elapsed = Date.now() - start;
 
+    // Read the updated badge count from the new context
+    const updatedState = readLedger(circuitResults.context.currentQueryContext as any);
+    const badgeId = updatedState.badge_count;
+
     return {
-      badgeId: 0n,
+      badgeId,
       proofGenTimeMs: elapsed,
     };
   }
@@ -297,25 +369,15 @@ export class ChainService {
   async getLatestBadge(): Promise<Badge> {
     await this.init();
 
-    // When connected to the indexer:
-    //
-    // const state = await this.queryContractState();
-    // const ledgerState: Ledger = readLedger(state);
-    //
-    // return {
-    //   claimType: Number(ledgerState.last_badge_claim_type),
-    //   expiresAt: ledgerState.last_badge_expires_at,
-    //   subjectHash: ledgerState.last_badge_subject_hash,
-    //   issuerHash: ledgerState.last_badge_issuer_hash,
-    //   state: ledgerState.last_badge_state,
-    // };
+    const state = await this.queryContractState();
+    const ledgerState: Ledger = readLedger(state);
 
     return {
-      claimType: 0,
-      expiresAt: 0n,
-      subjectHash: new Uint8Array(32),
-      issuerHash: new Uint8Array(32),
-      state: CompactBadgeState.EMPTY,
+      claimType: Number(ledgerState.last_badge_claim_type),
+      expiresAt: ledgerState.last_badge_expires_at,
+      subjectHash: ledgerState.last_badge_subject_hash,
+      issuerHash: ledgerState.last_badge_issuer_hash,
+      state: ledgerState.last_badge_state,
     };
   }
 
@@ -334,7 +396,10 @@ export class ChainService {
    */
   async getBadgeCount(): Promise<bigint> {
     await this.init();
-    return 0n;
+
+    const state = await this.queryContractState();
+    const ledgerState: Ledger = readLedger(state);
+    return ledgerState.badge_count;
   }
 
   /**
@@ -343,18 +408,20 @@ export class ChainService {
   async addIssuer(issuerPublicKey: Uint8Array): Promise<void> {
     await this.init();
 
-    // When connected:
-    //
-    // const privateState: EPoHPrivateState = {
-    //   ownerSecretKey: this.config.ownerSecretKey,
-    //   issuerSecretKey: new Uint8Array(32),
-    // };
-    //
-    // const context = { currentPrivateState: privateState, ...currentState };
-    // const { proofData } = this.contract!.circuits.addIssuer(context, issuerPublicKey);
-    //
-    // const recipe = await this.walletCtx!.wallet.finalizeRecipe(proofData);
-    // await this.walletCtx!.wallet.submitTransaction(recipe);
+    const privateState: EPoHPrivateState = {
+      ownerSecretKey: this.config.ownerSecretKey,
+      issuerSecretKey: new Uint8Array(32),
+    };
+
+    const contractState = await this.queryContractState();
+    const context = this.buildCircuitContext(privateState, contractState);
+
+    const circuitResults = this.contract!.circuits.addIssuer(context, issuerPublicKey);
+
+    this.lastCircuitContext = circuitResults.context;
+
+    const txId = await this.submitCircuitResult(circuitResults);
+    console.log(`  addIssuer tx submitted: ${txId}`);
   }
 
   /**

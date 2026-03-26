@@ -4,10 +4,8 @@
  *
  * Flow:
  *   1. Initialize the genesis (master) wallet — holds all minted NIGHT tokens
- *   2. Initialize the Lace wallet from user's mnemonic
- *   3. Transfer NIGHT from genesis → Lace
- *   4. Register DUST for the Lace wallet
- *   5. Use the Lace wallet for contract operations
+ *   2. Register DUST for the genesis wallet
+ *   3. Deploy the E-PoH Compact contract using the genesis wallet
  *
  * Usage:
  *   pnpm --filter backend exec tsx src/scripts/deploy.ts
@@ -31,9 +29,15 @@ import {
   UnshieldedWallet,
 } from "@midnight-ntwrk/wallet-sdk-unshielded-wallet";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
+import { createConstructorContext } from "@midnight-ntwrk/compact-runtime";
 import * as Rx from "rxjs";
 import { WebSocket } from "ws";
-import { mnemonicToSeedSync } from "@scure/bip39";
+import { randomBytes } from "crypto";
+
+import {
+  Contract,
+  type Witnesses,
+} from "../../../contracts/managed/epoh_badge/contract/index.js";
 
 // @ts-expect-error: Needed for apollo client used by wallet SDK
 globalThis.WebSocket = WebSocket;
@@ -51,13 +55,6 @@ const GENESIS_SEED = Buffer.from(
   "0000000000000000000000000000000000000000000000000000000000000001",
   "hex"
 );
-
-// Lace wallet mnemonic
-const LACE_MNEMONIC =
-  process.env.LACE_MNEMONIC ??
-  "humble release science section casino reopen glow isolate dilemma correct symbol glow ocean inherit hedgehog green behind shoe ceiling tooth metal bamboo dirt layer";
-
-const NIGHT_AMOUNT = 50_000n * 10n ** 6n; // 50,000 NIGHT
 
 // ── Wallet helpers ──────────────────────────────────────────────
 
@@ -121,23 +118,6 @@ async function waitForSync(wallet: WalletFacade): Promise<void> {
   );
 }
 
-async function waitForFunds(wallet: WalletFacade): Promise<void> {
-  await Rx.firstValueFrom(
-    wallet.state().pipe(
-      Rx.throttleTime(10_000),
-      Rx.tap((s) => {
-        const bal = (s.unshielded?.balances[ledger.nativeToken().raw] ?? 0n) +
-                    (s.shielded?.balances[ledger.nativeToken().raw] ?? 0n);
-        console.log(`  Balance: ${bal} NIGHT (synced: ${s.isSynced})`);
-      }),
-      Rx.filter((s) => s.isSynced),
-      Rx.map((s) => (s.unshielded?.balances[ledger.nativeToken().raw] ?? 0n) +
-                     (s.shielded?.balances[ledger.nativeToken().raw] ?? 0n)),
-      Rx.filter((balance) => balance > 0n),
-    )
-  );
-}
-
 async function getBalance(wallet: WalletFacade): Promise<{ night: bigint; dust: bigint }> {
   const state = await Rx.firstValueFrom(wallet.state());
   const night = (state.unshielded?.balances[ledger.nativeToken().raw] ?? 0n) +
@@ -146,33 +126,82 @@ async function getBalance(wallet: WalletFacade): Promise<{ night: bigint; dust: 
   return { night, dust };
 }
 
-async function transferNight(
-  from: WalletContext,
-  toAddress: any,
-  amount: bigint,
-): Promise<string> {
+// ── Contract deployment ────────────────────────────────────────
+
+interface EPoHPrivateState {
+  ownerSecretKey: Uint8Array;
+  issuerSecretKey: Uint8Array;
+}
+
+async function deployContract(
+  ctx: WalletContext,
+  ownerSecretKey: Uint8Array,
+): Promise<{ contractAddress: string; txId: string }> {
+  const privateState: EPoHPrivateState = {
+    ownerSecretKey,
+    issuerSecretKey: new Uint8Array(32),
+  };
+
+  // Set up contract with witness implementations
+  const witnesses: Witnesses<EPoHPrivateState> = {
+    ownerSecretKey: ({ privateState: ps }) => [ps, ps.ownerSecretKey],
+    issuerSecretKey: ({ privateState: ps }) => [ps, ps.issuerSecretKey],
+  };
+
+  const contract = new Contract<EPoHPrivateState>(witnesses);
+
+  // Create constructor context using the wallet's coin public key
+  const constructorContext = createConstructorContext(
+    privateState,
+    ctx.shieldedSecretKeys.coinPublicKey,
+  );
+
+  // Execute the constructor to get initial contract state
+  const constructorResult = contract.initialState(constructorContext, ownerSecretKey);
+
+  // The compact runtime returns a ContractState from onchain-runtime-v3, but
+  // ledger.ContractDeploy expects one from ledger-v7. Serialize → deserialize
+  // to cross the WASM module boundary.
+  const serialized = constructorResult.currentContractState.serialize();
+  const ledgerContractState = ledger.ContractState.deserialize(serialized);
+  const deploy = new ledger.ContractDeploy(ledgerContractState);
+  const contractAddress = deploy.address;
+  console.log(`  Contract address: ${contractAddress}`);
+
+  // Build the deployment transaction:
+  // 1. Create an intent with the deploy action
   const ttl = new Date(Date.now() + 30 * 60 * 1000);
-  const recipe = await from.wallet.transferTransaction(
-    [{
-      type: "unshielded",
-      outputs: [{
-        type: ledger.nativeToken().raw,
-        receiverAddress: toAddress,
-        amount,
-      }],
-    }],
+  const intent = ledger.Intent.new(ttl).addDeploy(deploy);
+
+  // 2. Build an unproven transaction with the intent
+  const unprovenTx = ledger.Transaction.fromPartsRandomized(
+    NETWORK_ID,
+    undefined, // no guaranteed offer
+    undefined, // no fallible offer
+    intent,
+  );
+
+  // 3. Balance the transaction (adds fee inputs/outputs)
+  const recipe = await ctx.wallet.balanceUnprovenTransaction(
+    unprovenTx,
     {
-      shieldedSecretKeys: from.shieldedSecretKeys,
-      dustSecretKey: from.dustSecretKey,
+      shieldedSecretKeys: ctx.shieldedSecretKeys,
+      dustSecretKey: ctx.dustSecretKey,
     },
     { ttl },
   );
-  const signed = await from.wallet.signRecipe(
+
+  // 4. Sign the recipe
+  const signed = await ctx.wallet.signRecipe(
     recipe,
-    (payload: any) => from.unshieldedKeystore.signData(payload),
+    (payload: any) => ctx.unshieldedKeystore.signData(payload),
   );
-  const finalized = await from.wallet.finalizeRecipe(signed);
-  return await from.wallet.submitTransaction(finalized);
+
+  // 5. Finalize (prove) and submit
+  const finalizedTx = await ctx.wallet.finalizeRecipe(signed);
+  const txId = await ctx.wallet.submitTransaction(finalizedTx);
+
+  return { contractAddress: contractAddress.toString(), txId };
 }
 
 async function registerDust(ctx: WalletContext): Promise<void> {
@@ -223,45 +252,47 @@ async function main() {
   console.log();
 
   // Step 1: Initialize genesis wallet
-  console.log("[1/5] Initializing genesis (master) wallet...");
+  console.log("[1/4] Initializing genesis (master) wallet...");
   const genesis = await initWallet(GENESIS_SEED);
   console.log("  Waiting for sync (this takes ~10 minutes on first run)...");
   await waitForSync(genesis.wallet);
   const genesisBalance = await getBalance(genesis.wallet);
   console.log(`  Genesis balance: ${genesisBalance.night} NIGHT, ${genesisBalance.dust} DUST`);
 
-  // Step 2: Initialize Lace wallet
-  console.log("\n[2/5] Initializing Lace wallet...");
-  const laceSeed = Buffer.from(mnemonicToSeedSync(LACE_MNEMONIC));
-  const lace = await initWallet(laceSeed);
-  const laceAddr = await lace.wallet.unshielded.getAddress();
-  console.log(`  Lace address: ${lace.unshieldedKeystore.getBech32Address().asString()}`);
+  // Step 2: Register DUST for genesis wallet
+  console.log("\n[2/4] Registering DUST for genesis wallet...");
+  await registerDust(genesis);
+  const finalBalance = await getBalance(genesis.wallet);
+  console.log(`  Genesis balance: ${finalBalance.night} NIGHT, ${finalBalance.dust} DUST`);
 
-  // Step 3: Transfer NIGHT from genesis to Lace
-  console.log("\n[3/5] Transferring 50,000 NIGHT from genesis to Lace...");
-  const txId = await transferNight(genesis, laceAddr, NIGHT_AMOUNT);
-  console.log(`  Transfer tx: ${txId}`);
+  // Step 3: Deploy the E-PoH contract
+  console.log("\n[3/4] Deploying E-PoH Compact contract...");
+  const ownerSecretKey = randomBytes(32);
+  console.log(`  Owner secret key (save this!): ${ownerSecretKey.toString("hex")}`);
+  const { contractAddress, txId: deployTxId } = await deployContract(genesis, ownerSecretKey);
+  console.log(`  Deploy tx: ${deployTxId}`);
+  console.log(`  Contract deployed at: ${contractAddress}`);
 
-  // Wait for Lace to receive funds
-  console.log("  Waiting for Lace wallet to receive funds...");
-  await waitForSync(lace.wallet);
-  await waitForFunds(lace.wallet);
-  const laceBalance = await getBalance(lace.wallet);
-  console.log(`  Lace balance: ${laceBalance.night} NIGHT`);
+  // Wait for the deployment to be confirmed
+  console.log("  Waiting for deployment confirmation...");
+  await waitForSync(genesis.wallet);
 
-  // Step 4: Register DUST for Lace
-  console.log("\n[4/5] Registering DUST for Lace wallet...");
-  await registerDust(lace);
-  const finalBalance = await getBalance(lace.wallet);
-  console.log(`  Lace final balance: ${finalBalance.night} NIGHT, ${finalBalance.dust} DUST`);
-
-  // Step 5: Done
-  console.log("\n[5/5] Wallet funded and ready!");
-  console.log("  The Lace wallet now has NIGHT + DUST to deploy contracts and submit transactions.");
+  // Step 4: Done
+  console.log("\n[4/4] Deployment complete!");
+  console.log();
+  console.log("  ┌─────────────────────────────────────────────────┐");
+  console.log("  │  E-PoH Contract Deployed Successfully          │");
+  console.log("  ├─────────────────────────────────────────────────┤");
+  console.log(`  │  Contract: ${contractAddress}`);
+  console.log(`  │  Owner SK: ${ownerSecretKey.toString("hex")}`);
+  console.log("  └─────────────────────────────────────────────────┘");
+  console.log();
+  console.log("  Set these env vars for the backend:");
+  console.log(`    EPOH_CONTRACT_ADDRESS=${contractAddress}`);
+  console.log(`    EPOH_OWNER_SECRET_KEY=${ownerSecretKey.toString("hex")}`);
 
   // Cleanup
   await genesis.wallet.stop();
-  await lace.wallet.stop();
   console.log("\nDone.");
   process.exit(0);
 }
