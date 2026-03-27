@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { BadgeCard } from "../components/BadgeCard";
 import { Shield, Plus, Loader2 } from "lucide-react";
 import Link from "next/link";
+import { getStoredSubjectAddress } from "../lib/lace";
 
 interface Badge {
   tokenId: number;
@@ -13,42 +14,43 @@ interface Badge {
   issuerHash: string;
 }
 
-// Demo badges for showcase (in production, fetch from chain)
-const DEMO_BADGES: Badge[] = [
-  {
-    tokenId: 0,
-    claimType: 0,
-    expiresAt: Math.floor(Date.now() / 1000) + 86400, // 24h from now
-    subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
-  },
-  {
-    tokenId: 1,
-    claimType: 1,
-    expiresAt: Math.floor(Date.now() / 1000) + 3000, // ~50 min (expiring soon)
-    subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
-  },
-  {
-    tokenId: 2,
-    claimType: 2,
-    expiresAt: Math.floor(Date.now() / 1000) - 3600, // expired 1h ago
-    subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
-  },
-];
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 export default function BadgesPage() {
   const [badges, setBadges] = useState<Badge[]>([]);
   const [loading, setLoading] = useState(true);
+  const [walletConnected, setWalletConnected] = useState(false);
 
   useEffect(() => {
-    // Simulate loading from chain
-    const timer = setTimeout(() => {
-      setBadges(DEMO_BADGES);
-      setLoading(false);
-    }, 800);
-    return () => clearTimeout(timer);
+    async function loadBadges() {
+      setLoading(true);
+      const subjectAddress = getStoredSubjectAddress();
+      if (!subjectAddress) {
+        setWalletConnected(false);
+        setBadges([]);
+        setLoading(false);
+        return;
+      }
+
+      setWalletConnected(true);
+      try {
+        const res = await fetch(
+          `${API_URL}/badges?subjectAddress=${encodeURIComponent(subjectAddress)}`
+        );
+        if (!res.ok) {
+          throw new Error(`Failed to fetch badges: ${res.statusText}`);
+        }
+        const data = (await res.json()) as Badge[];
+        setBadges(data);
+      } catch (e) {
+        console.error(e);
+        setBadges([]);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    void loadBadges();
   }, []);
 
   const activeBadges = badges.filter(
@@ -83,6 +85,16 @@ export default function BadgesPage() {
         <div className="flex flex-col items-center justify-center py-20 text-muted">
           <Loader2 className="mb-3 h-8 w-8 animate-spin" />
           <p className="text-sm">Loading badges...</p>
+        </div>
+      ) : !walletConnected ? (
+        <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-surface py-20">
+          <Shield className="mb-4 h-12 w-12 text-muted/40" />
+          <h2 className="mb-2 font-heading text-lg font-bold text-foreground">
+            Connect Lace Wallet
+          </h2>
+          <p className="mb-6 max-w-xs text-center text-sm text-muted">
+            Connect your Lace wallet from the top-right button to view only your badges.
+          </p>
         </div>
       ) : badges.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-surface py-20">

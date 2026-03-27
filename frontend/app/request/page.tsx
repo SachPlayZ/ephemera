@@ -11,6 +11,7 @@ import {
   Copy,
   Check,
 } from "lucide-react";
+import { getStoredSubjectAddress } from "../lib/lace";
 
 const CLAIM_TYPES = [
   { value: 0, label: "Vaccinated", icon: Syringe, color: "border-blue-300 bg-blue-50 text-blue-700" },
@@ -41,6 +42,13 @@ export default function RequestPage() {
 
   async function handleRequest() {
     if (selectedType === null) return;
+    const subjectAddress = getStoredSubjectAddress();
+    if (!subjectAddress) {
+      setError("Connect your Lace wallet first to request a badge.");
+      setStep("error");
+      return;
+    }
+
     setStep("issuing");
     setPhase("Issuing health claim...");
     setError("");
@@ -53,7 +61,7 @@ export default function RequestPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           claimType: selectedType,
-          subjectAddress: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+          subjectAddress,
           issuedAt: now,
           expiresAt: now + 86400,
         }),
@@ -83,8 +91,8 @@ export default function RequestPage() {
       setBadgeResult(result);
       setStep("done");
       setPhase("");
-    } catch (err: any) {
-      setError(err.message ?? "Something went wrong");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Something went wrong");
       setStep("error");
     }
   }

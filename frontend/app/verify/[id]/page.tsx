@@ -16,7 +16,6 @@ import { QRCodeSVG } from "qrcode.react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 const CLAIM_ICONS = [Syringe, TestTube, HeartPulse];
-const CLAIM_LABELS = ["Vaccinated", "Test Negative", "Medically Fit"];
 
 interface BadgeData {
   badgeId: string;
@@ -27,22 +26,6 @@ interface BadgeData {
   subjectHash: string;
   issuerHash: string;
   state: string;
-}
-
-// Demo data for when backend is unavailable
-function getDemoBadge(id: string): BadgeData {
-  const claimType = Number(id) % 3;
-  const expiresAt = Math.floor(Date.now() / 1000) + 86400;
-  return {
-    badgeId: id,
-    valid: true,
-    claimType,
-    claimLabel: CLAIM_LABELS[claimType],
-    expiresAt,
-    subjectHash: "0x066941c7b276ab78294d1e1511090b6df9232b21561f5d203bd047a7d0732108",
-    issuerHash: "0x16b085b3d759d330bcf290a3fdbf56595330d4acbd57e8ae9360f09e22206112",
-    state: "ACTIVE",
-  };
 }
 
 export default function VerifyPage({ params }: { params: Promise<{ id: string }> }) {
@@ -57,9 +40,9 @@ export default function VerifyPage({ params }: { params: Promise<{ id: string }>
         const res = await fetch(`${API_URL}/verify/${id}`);
         if (!res.ok) throw new Error("Badge not found");
         setBadge(await res.json());
-      } catch {
-        // Fallback to demo data
-        setBadge(getDemoBadge(id));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to verify badge");
+        setBadge(null);
       } finally {
         setLoading(false);
       }
@@ -93,7 +76,6 @@ export default function VerifyPage({ params }: { params: Promise<{ id: string }>
   }
 
   const Icon = CLAIM_ICONS[badge.claimType] ?? HeartPulse;
-  const timeLeft = badge.expiresAt - Math.floor(Date.now() / 1000);
   const expiryDate = new Date(badge.expiresAt * 1000).toLocaleString();
 
   return (

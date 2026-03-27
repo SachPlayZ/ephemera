@@ -75,7 +75,8 @@ export pure circuit hashSubject(subject: Bytes<32>): Bytes<32> {
 // --- Constructor ---
 
 constructor(sk: Bytes<32>) {
-  authority = disclose(derivePublicKey(sk, round as Field as Bytes<32>));
+  // Owner authority uses a static nonce — independent of round counter
+  authority = disclose(derivePublicKey(sk, pad(32, "ephemera:epoh:owner")));
   last_badge_state = BadgeState.EMPTY;
 }
 
@@ -86,7 +87,8 @@ constructor(sk: Bytes<32>) {
 // issuer_count is a public ledger value, so branching on it is safe.
 export circuit addIssuer(issuer_pk: Bytes<32>): [] {
   const sk = ownerSecretKey();
-  const pk = derivePublicKey(sk, round as Field as Bytes<32>);
+  // Owner authority uses static nonce, not the round counter
+  const pk = derivePublicKey(sk, pad(32, "ephemera:epoh:owner"));
   assert(authority == pk, "Not authorized as contract owner");
 
   assert(issuer_count < 4, "Maximum issuers reached");
@@ -134,8 +136,9 @@ export circuit mintBadge(
   assert(expires_at > issued_at, "Expiry must be after issuance");
 
   // C3: Verify issuer identity via witness-provided secret key
+  // Issuers use a static nonce for key derivation
   const isk = issuerSecretKey();
-  const issuer_pk = derivePublicKey(isk, round as Field as Bytes<32>);
+  const issuer_pk = derivePublicKey(isk, pad(32, "ephemera:epoh:issuer"));
 
   // C4: Check issuer is registered — using arithmetic to avoid branching.
   // Cast each Boolean comparison to Uint, then sum. No short-circuit.
@@ -155,17 +158,17 @@ export circuit mintBadge(
   last_badge_issuer_hash = disclose(issuer_pk);
   last_badge_state = BadgeState.ACTIVE;
   badge_count.increment(1);
-  round.increment(1);
 }
+
 
 // Revoke the latest badge (owner-only).
 export circuit revokeBadge(): [] {
   assert(last_badge_state == BadgeState.ACTIVE, "No active badge to revoke");
 
   const sk = ownerSecretKey();
-  const pk = derivePublicKey(sk, round as Field as Bytes<32>);
+  // Owner authority uses static nonce, not the round counter
+  const pk = derivePublicKey(sk, pad(32, "ephemera:epoh:owner"));
   assert(authority == pk, "Not authorized to revoke");
 
   last_badge_state = BadgeState.REVOKED;
-  round.increment(1);
 }

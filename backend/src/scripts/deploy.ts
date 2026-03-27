@@ -13,7 +13,7 @@
  * Requires: docker compose up -d (Midnight node, indexer, proof server)
  */
 
-import * as ledger from "@midnight-ntwrk/ledger-v7";
+import * as ledger from "@midnight-ntwrk/ledger-v8";
 import { HDWallet, Roles } from "@midnight-ntwrk/wallet-sdk-hd";
 import {
   type DefaultConfiguration,
@@ -29,8 +29,16 @@ import {
   UnshieldedWallet,
 } from "@midnight-ntwrk/wallet-sdk-unshielded-wallet";
 import { setNetworkId } from "@midnight-ntwrk/midnight-js-network-id";
-import { createConstructorContext } from "@midnight-ntwrk/compact-runtime";
+import {
+  createConstructorContext,
+  sampleSigningKey,
+  signatureVerifyingKey,
+  signData,
+} from "@midnight-ntwrk/compact-runtime";
 import * as Rx from "rxjs";
+import { readFileSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 import { WebSocket } from "ws";
 import { randomBytes } from "crypto";
 
@@ -74,11 +82,11 @@ function makeConfig(): DefaultConfiguration {
     },
     provingServerUrl: new URL(PROOF_SERVER),
     relayURL: new URL(NODE_URL.replace(/^http/, "ws")),
+    txHistoryStorage: new InMemoryTransactionHistoryStorage(),
     costParameters: {
       additionalFeeOverhead: 300_000_000_000_000n,
       feeBlocksMargin: 5,
     },
-    txHistoryStorage: new InMemoryTransactionHistoryStorage(),
   };
 }
 
@@ -128,6 +136,13 @@ async function getBalance(wallet: WalletFacade): Promise<{ night: bigint; dust: 
 
 // ── Contract deployment ────────────────────────────────────────
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const KEYS_DIR = resolve(__dirname, "../../../contracts/managed/epoh_badge/keys");
+
+function readVerifierKey(circuit: string): Uint8Array {
+  return new Uint8Array(readFileSync(resolve(KEYS_DIR, `${circuit}.verifier`)));
+}
+
 interface EPoHPrivateState {
   ownerSecretKey: Uint8Array;
   issuerSecretKey: Uint8Array;
@@ -136,72 +151,113 @@ interface EPoHPrivateState {
 async function deployContract(
   ctx: WalletContext,
   ownerSecretKey: Uint8Array,
-): Promise<{ contractAddress: string; txId: string }> {
+): Promise<{ contractAddress: ledger.ContractAddress; txId: string; maintenanceSigningKey: Uint8Array }> {
   const privateState: EPoHPrivateState = {
     ownerSecretKey,
     issuerSecretKey: new Uint8Array(32),
   };
 
-  // Set up contract with witness implementations
   const witnesses: Witnesses<EPoHPrivateState> = {
     ownerSecretKey: ({ privateState: ps }) => [ps, ps.ownerSecretKey],
     issuerSecretKey: ({ privateState: ps }) => [ps, ps.issuerSecretKey],
   };
 
   const contract = new Contract<EPoHPrivateState>(witnesses);
-
-  // Create constructor context using the wallet's coin public key
   const constructorContext = createConstructorContext(
     privateState,
     ctx.shieldedSecretKeys.coinPublicKey,
   );
-
-  // Execute the constructor to get initial contract state
   const constructorResult = contract.initialState(constructorContext, ownerSecretKey);
 
-  // The compact runtime returns a ContractState from onchain-runtime-v3, but
-  // ledger.ContractDeploy expects one from ledger-v7. Serialize → deserialize
-  // to cross the WASM module boundary.
+  // Cross the WASM module boundary: serialize from onchain-runtime-v3, deserialize into ledger-v8.
+  // We create a CLEAN ContractState (without pre-registered circuit operations from the ZKIR)
+  // because the node rejects deploys that have operations registered without matching verifier keys.
+  // Circuit operations are registered separately via MaintenanceUpdate after deployment.
   const serialized = constructorResult.currentContractState.serialize();
-  const ledgerContractState = ledger.ContractState.deserialize(serialized);
+  const sourceState = ledger.ContractState.deserialize(serialized);
+  const ledgerContractState = new ledger.ContractState();
+  ledgerContractState.data = sourceState.data;
+  ledgerContractState.balance = sourceState.balance;
+
+  // Generate a maintenance authority signing key and set it on the contract state
+  const maintenanceSigningKey = sampleSigningKey();
+  const maintenanceVk = signatureVerifyingKey(maintenanceSigningKey);
+  ledgerContractState.maintenanceAuthority = new ledger.ContractMaintenanceAuthority(
+    [maintenanceVk],
+    1,
+    0n,
+  );
+
   const deploy = new ledger.ContractDeploy(ledgerContractState);
   const contractAddress = deploy.address;
   console.log(`  Contract address: ${contractAddress}`);
 
-  // Build the deployment transaction:
-  // 1. Create an intent with the deploy action
   const ttl = new Date(Date.now() + 30 * 60 * 1000);
-  const intent = ledger.Intent.new(ttl).addDeploy(deploy);
 
-  // 2. Build an unproven transaction with the intent
   const unprovenTx = ledger.Transaction.fromPartsRandomized(
     NETWORK_ID,
-    undefined, // no guaranteed offer
-    undefined, // no fallible offer
-    intent,
+    undefined,
+    undefined,
+    ledger.Intent.new(ttl).addDeploy(deploy),
   );
 
-  // 3. Balance the transaction (adds fee inputs/outputs)
   const recipe = await ctx.wallet.balanceUnprovenTransaction(
     unprovenTx,
-    {
-      shieldedSecretKeys: ctx.shieldedSecretKeys,
-      dustSecretKey: ctx.dustSecretKey,
-    },
+    { shieldedSecretKeys: ctx.shieldedSecretKeys, dustSecretKey: ctx.dustSecretKey },
     { ttl },
   );
-
-  // 4. Sign the recipe
   const signed = await ctx.wallet.signRecipe(
     recipe,
-    (payload: any) => ctx.unshieldedKeystore.signData(payload),
+    (payload: Uint8Array) => ctx.unshieldedKeystore.signData(payload),
   );
-
-  // 5. Finalize (prove) and submit
   const finalizedTx = await ctx.wallet.finalizeRecipe(signed);
   const txId = await ctx.wallet.submitTransaction(finalizedTx);
 
-  return { contractAddress: contractAddress.toString(), txId };
+  return { contractAddress, txId, maintenanceSigningKey };
+}
+
+async function registerVerifierKeys(
+  ctx: WalletContext,
+  contractAddress: ledger.ContractAddress,
+  maintenanceSigningKey: Uint8Array,
+): Promise<string> {
+  const circuits = ["addIssuer", "mintBadge", "revokeBadge"];
+  console.log(`  Registering verifier keys for ${circuits.length} circuits...`);
+
+  const updates = circuits.map((name) =>
+    new ledger.VerifierKeyInsert(
+      name,
+      new ledger.ContractOperationVersionedVerifierKey("v3", readVerifierKey(name)),
+    )
+  );
+
+  // counter must be 0n for first maintenance update after deployment
+  const maintenanceUpdate = new ledger.MaintenanceUpdate(contractAddress, updates, 0n);
+
+  // Sign with our maintenance authority key (index 0 in the committee)
+  const sig = signData(maintenanceSigningKey, maintenanceUpdate.dataToSign);
+  const signedUpdate = maintenanceUpdate.addSignature(0n, sig);
+
+  const ttl = new Date(Date.now() + 30 * 60 * 1000);
+  const unprovenTx = ledger.Transaction.fromPartsRandomized(
+    NETWORK_ID,
+    undefined,
+    undefined,
+    ledger.Intent.new(ttl).addMaintenanceUpdate(signedUpdate),
+  );
+
+  const recipe = await ctx.wallet.balanceUnprovenTransaction(
+    unprovenTx,
+    { shieldedSecretKeys: ctx.shieldedSecretKeys, dustSecretKey: ctx.dustSecretKey },
+    { ttl },
+  );
+  const signed2 = await ctx.wallet.signRecipe(
+    recipe,
+    (payload: Uint8Array) => ctx.unshieldedKeystore.signData(payload),
+  );
+  const finalizedTx = await ctx.wallet.finalizeRecipe(signed2);
+  const txId = await ctx.wallet.submitTransaction(finalizedTx);
+  return txId;
 }
 
 async function registerDust(ctx: WalletContext): Promise<void> {
@@ -219,13 +275,12 @@ async function registerDust(ctx: WalletContext): Promise<void> {
   const recipe = await ctx.wallet.registerNightUtxosForDustGeneration(
     unregistered,
     ctx.unshieldedKeystore.getPublicKey(),
-    (payload: any) => ctx.unshieldedKeystore.signData(payload),
+    (payload: Uint8Array) => ctx.unshieldedKeystore.signData(payload),
   );
   const finalized = await ctx.wallet.finalizeRecipe(recipe);
   const txId = await ctx.wallet.submitTransaction(finalized);
   console.log(`  DUST registration tx: ${txId}`);
 
-  // Wait for DUST to appear
   await Rx.firstValueFrom(
     ctx.wallet.state().pipe(
       Rx.throttleTime(5_000),
@@ -251,47 +306,48 @@ async function main() {
   console.log(`Proof Server: ${PROOF_SERVER}`);
   console.log();
 
-  // Step 1: Initialize genesis wallet
   console.log("[1/4] Initializing genesis (master) wallet...");
   const genesis = await initWallet(GENESIS_SEED);
-  console.log("  Waiting for sync (this takes ~10 minutes on first run)...");
+  console.log("  Waiting for sync...");
   await waitForSync(genesis.wallet);
   const genesisBalance = await getBalance(genesis.wallet);
   console.log(`  Genesis balance: ${genesisBalance.night} NIGHT, ${genesisBalance.dust} DUST`);
 
-  // Step 2: Register DUST for genesis wallet
   console.log("\n[2/4] Registering DUST for genesis wallet...");
   await registerDust(genesis);
   const finalBalance = await getBalance(genesis.wallet);
   console.log(`  Genesis balance: ${finalBalance.night} NIGHT, ${finalBalance.dust} DUST`);
 
-  // Step 3: Deploy the E-PoH contract
-  console.log("\n[3/4] Deploying E-PoH Compact contract...");
+  console.log("\n[3/5] Deploying E-PoH Compact contract...");
   const ownerSecretKey = randomBytes(32);
   console.log(`  Owner secret key (save this!): ${ownerSecretKey.toString("hex")}`);
-  const { contractAddress, txId: deployTxId } = await deployContract(genesis, ownerSecretKey);
+  const { contractAddress, txId: deployTxId, maintenanceSigningKey } = await deployContract(genesis, ownerSecretKey);
   console.log(`  Deploy tx: ${deployTxId}`);
   console.log(`  Contract deployed at: ${contractAddress}`);
 
-  // Wait for the deployment to be confirmed
-  console.log("  Waiting for deployment confirmation...");
+  console.log("  Waiting for deployment to be indexed...");
+  await new Promise((r) => setTimeout(r, 8000));
+
+  console.log("\n[4/5] Registering ZK verifier keys...");
+  const vkTxId = await registerVerifierKeys(genesis, contractAddress, maintenanceSigningKey);
+  console.log(`  Verifier key registration tx: ${vkTxId}`);
+
+  console.log("  Waiting for verifier key registration...");
   await waitForSync(genesis.wallet);
 
-  // Step 4: Done
-  console.log("\n[4/4] Deployment complete!");
+  console.log("\n[5/5] Deployment complete!");
   console.log();
   console.log("  ┌─────────────────────────────────────────────────┐");
   console.log("  │  E-PoH Contract Deployed Successfully          │");
   console.log("  ├─────────────────────────────────────────────────┤");
-  console.log(`  │  Contract: ${contractAddress}`);
+  console.log(`  │  Contract: ${String(contractAddress)}`);
   console.log(`  │  Owner SK: ${ownerSecretKey.toString("hex")}`);
   console.log("  └─────────────────────────────────────────────────┘");
   console.log();
   console.log("  Set these env vars for the backend:");
-  console.log(`    EPOH_CONTRACT_ADDRESS=${contractAddress}`);
+  console.log(`    EPOH_CONTRACT_ADDRESS=${String(contractAddress)}`);
   console.log(`    EPOH_OWNER_SECRET_KEY=${ownerSecretKey.toString("hex")}`);
 
-  // Cleanup
   await genesis.wallet.stop();
   console.log("\nDone.");
   process.exit(0);

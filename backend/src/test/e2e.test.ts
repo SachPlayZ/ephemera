@@ -11,6 +11,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { IssuerService } from "../services/issuer.service.js";
 import { ProofService } from "../services/proof.service.js";
+import { ChainService } from "../services/chain.service.js";
+import { pureCircuits } from "../../../contracts/managed/epoh_badge/contract/index.js";
 
 // Test issuer secret key (32 bytes, local dev only)
 const ISSUER_PRIVATE_KEY =
@@ -20,14 +22,32 @@ const SUBJECT_ADDRESS = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as const;
 
 describe("E-PoH E2E: Issue -> Prove -> Mint (Midnight)", () => {
   let proofService: ProofService;
+  let chainService: ChainService;
 
   beforeAll(async () => {
+    chainService = new ChainService();
+    await chainService.init();
+
     proofService = new ProofService();
     await proofService.init();
-  }, 30000);
+
+    // Register test issuer on the contract before minting
+    const issuerSecretKey = Buffer.from(ISSUER_PRIVATE_KEY, "hex");
+    // Must match the issuer nonce used in mintBadge circuit
+    const issuerNonce = new TextEncoder().encode("ephemera:epoh:issuer".padEnd(32, "\0").slice(0, 32));
+    const issuerPublicKey = pureCircuits.derivePublicKey(
+      issuerSecretKey,
+      new Uint8Array(issuerNonce),
+    );
+    await chainService.addIssuer(issuerPublicKey);
+    // Wait for the addIssuer transaction to be confirmed and indexed
+    await new Promise((r) => setTimeout(r, 10_000));
+    console.log("  Test issuer registered.");
+  }, 120000);
 
   afterAll(async () => {
     await proofService.destroy();
+    await chainService.destroy();
   });
 
   it("should issue a claim and generate a proof", async () => {

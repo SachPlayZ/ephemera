@@ -12,7 +12,7 @@
 services:
   proof-server:
     container_name: midnight-proof-server
-    image: bricktowers/proof-server:7.0.0
+    image: midnightntwrk/proof-server:8.0.3
     ports:
       - '6300:6300'
     environment:
@@ -20,7 +20,7 @@ services:
 
   indexer:
     container_name: midnight-indexer
-    image: midnightntwrk/indexer-standalone:3.1.0
+    image: midnightntwrk/indexer-standalone:4.0.0
     env_file: standalone.env
     ports:
       - '8088:8088'
@@ -39,7 +39,7 @@ services:
 
   node:
     container_name: midnight-node
-    image: midnightntwrk/midnight-node:0.21.0
+    image: midnightntwrk/midnight-node:0.22.2
     ports:
       - '9944:9944'
     healthcheck:

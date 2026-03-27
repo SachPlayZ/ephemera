@@ -13,7 +13,7 @@
  *   - Proof Server: http://localhost:6300
  */
 
-import * as ledger from "@midnight-ntwrk/ledger-v7";
+import * as ledger from "@midnight-ntwrk/ledger-v8";
 import { HDWallet, Roles } from "@midnight-ntwrk/wallet-sdk-hd";
 import {
   type DefaultConfiguration,
@@ -33,9 +33,51 @@ import {
   createCircuitContext,
   type CircuitContext,
   type CircuitResults,
+  communicationCommitmentRandomness,
+  communicationCommitment,
 } from "@midnight-ntwrk/compact-runtime";
+import { makeWasmProvingService } from "@midnight-ntwrk/wallet-sdk-capabilities/proving";
+import { WasmProver } from "@midnight-ntwrk/wallet-sdk-prover-client/effect";
 import * as Rx from "rxjs";
 import { WebSocket } from "ws";
+import { readFileSync, existsSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Path to compiled contract keys relative to this service file
+const KEYS_DIR = resolve(__dirname, "../../../contracts/managed/epoh_badge/keys");
+const ZKIR_DIR = resolve(__dirname, "../../../contracts/managed/epoh_badge/zkir");
+
+/**
+ * Key material provider that reads proving keys from local compiled contract files.
+ * Wraps the default provider (for Zswap/Dust) and adds user-defined circuit keys.
+ */
+function makeLocalKeyMaterialProvider() {
+  const defaultProvider = WasmProver.makeDefaultKeyMaterialProvider();
+  return {
+    async lookupKey(keyLocation: string) {
+      const proverFile = resolve(KEYS_DIR, `${keyLocation}.prover`);
+      const verifierFile = resolve(KEYS_DIR, `${keyLocation}.verifier`);
+      const irFile = resolve(ZKIR_DIR, `${keyLocation}.bzkir`);
+
+      if (existsSync(proverFile) && existsSync(verifierFile) && existsSync(irFile)) {
+        return {
+          proverKey: new Uint8Array(readFileSync(proverFile)),
+          verifierKey: new Uint8Array(readFileSync(verifierFile)),
+          ir: new Uint8Array(readFileSync(irFile)),
+        };
+      }
+
+      // Fall back to default (Zswap, Dust circuits)
+      return defaultProvider.lookupKey(keyLocation);
+    },
+    // Fetch universal proof parameters from the Midnight S3 bucket
+    getParams: defaultProvider.getParams,
+  };
+}
 
 import {
   Contract,
@@ -82,12 +124,16 @@ export interface MidnightConfig {
 }
 
 const DEFAULT_CONFIG: MidnightConfig = {
-  nodeUrl: "http://127.0.0.1:9944",
-  indexerUrl: "http://127.0.0.1:8088/api/v3/graphql",
-  indexerWsUrl: "ws://127.0.0.1:8088/api/v3/graphql/ws",
-  proofServerUrl: "http://127.0.0.1:6300",
+  nodeUrl: process.env.MIDNIGHT_NODE_URL ?? "http://127.0.0.1:9944",
+  indexerUrl: process.env.MIDNIGHT_INDEXER_URL ?? "http://127.0.0.1:8088/api/v3/graphql",
+  indexerWsUrl: process.env.MIDNIGHT_INDEXER_WS ?? "ws://127.0.0.1:8088/api/v3/graphql/ws",
+  proofServerUrl: process.env.MIDNIGHT_PROOF_SERVER ?? "http://127.0.0.1:6300",
   networkId: "undeployed",
-  ownerSecretKey: new Uint8Array(32),
+  ownerSecretKey: process.env.EPOH_OWNER_SECRET_KEY
+    ? Buffer.from(process.env.EPOH_OWNER_SECRET_KEY, "hex")
+    : new Uint8Array(32),
+  contractAddress: process.env.EPOH_CONTRACT_ADDRESS,
+  walletSeed: process.env.EPOH_WALLET_SEED,
 };
 
 /**
@@ -172,15 +218,17 @@ export class ChainService {
    * Submit a circuit call result as a transaction to the network.
    */
   private async submitCircuitResult(
+    circuitName: string,
     circuitResults: CircuitResults<EPoHPrivateState, any>,
+    ledgerState: ledger.ContractState,
   ): Promise<string> {
     if (!this.walletCtx) throw new Error("Wallet not initialized");
 
+    const unprovenTx = this.buildUnprovenTxFromCircuit(circuitName, circuitResults, ledgerState);
     const ttl = new Date(Date.now() + 30 * 60 * 1000);
 
-    // Balance the unproven transaction from proof data
     const recipe = await this.walletCtx.wallet.balanceUnprovenTransaction(
-      circuitResults.proofData as any,
+      unprovenTx,
       {
         shieldedSecretKeys: this.walletCtx.shieldedSecretKeys,
         dustSecretKey: this.walletCtx.dustSecretKey,
@@ -188,7 +236,6 @@ export class ChainService {
       { ttl },
     );
 
-    // Sign and finalize
     const signed = await this.walletCtx.wallet.signRecipe(
       recipe,
       (payload: any) => this.walletCtx!.unshieldedKeystore.signData(payload),
@@ -199,20 +246,96 @@ export class ChainService {
 
   /**
    * Query the contract's current on-chain state from the indexer.
+   * Returns { ocrtState, ledgerState, hexState }.
    */
-  async queryContractState(): Promise<any> {
+  async queryContractState(): Promise<{
+    ocrtState: any;
+    ledgerState: ledger.ContractState;
+    hexState: string;
+  }> {
     if (!this.config.contractAddress) throw new Error("Contract address not set");
 
-    // Query the indexer for the contract's current state
+    // Indexer v4 renamed contractState → contractAction
     const response = await fetch(this.config.indexerUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        query: `query { contractState(address: "${this.config.contractAddress}") { state } }`,
+        query: `query { contractAction(address: "${this.config.contractAddress}") { state } }`,
       }),
     });
     const data = await response.json();
-    return data?.data?.contractState?.state;
+    const hexState: string | undefined = data?.data?.contractAction?.state;
+    if (!hexState) throw new Error("Contract state not found on chain");
+
+    const bytes = hexToBytes(hexState);
+
+    // onchain-runtime-v3 ContractState (for circuit context)
+    const { ContractState: OcrtContractState } = await import("@midnight-ntwrk/compact-runtime");
+    const ocrtState = OcrtContractState.deserialize(bytes);
+
+    // ledger-v8 ContractState (for operations and QueryContext)
+    const ledgerState = ledger.ContractState.deserialize(bytes);
+
+    return { ocrtState, ledgerState, hexState };
+  }
+
+  /**
+   * Build an UnprovenTransaction from a circuit's results.
+   * Crosses the onchain-runtime-v3 → ledger-v8 WASM boundary.
+   */
+  private buildUnprovenTxFromCircuit(
+    circuitName: string,
+    circuitResults: CircuitResults<EPoHPrivateState, any>,
+    ledgerState: ledger.ContractState,
+  ): ledger.UnprovenTransaction {
+    const address = this.config.contractAddress!;
+    const { proofData } = circuitResults;
+
+    const op = ledgerState.operation(circuitName);
+    if (!op) throw new Error(`ContractOperation not found for circuit: ${circuitName}`);
+
+    // Build a fresh ledger-v8 QueryContext from the on-chain state
+    const queryContext = new ledger.QueryContext(ledgerState.data, address);
+
+    // Generate communication commitment randomness
+    const rand = communicationCommitmentRandomness();
+    const commComm = communicationCommitment(
+      proofData.input as any,
+      proofData.output as any,
+      rand,
+    );
+
+    const preTranscript = new ledger.PreTranscript(
+      queryContext,
+      proofData.publicTranscript as any,
+      commComm,
+    );
+
+    const preCall = new ledger.PrePartitionContractCall(
+      address,
+      circuitName,
+      op,
+      preTranscript,
+      proofData.privateTranscriptOutputs as any,
+      proofData.input as any,
+      proofData.output as any,
+      rand,
+      circuitName,
+    );
+
+    const ttl = new Date(Date.now() + 30 * 60 * 1000);
+    const baseTx = ledger.Transaction.fromPartsRandomized(
+      this.config.networkId,
+      undefined,
+      undefined,
+      undefined,
+    );
+    return baseTx.addCalls(
+      { tag: "random" },
+      [preCall],
+      ledger.LedgerParameters.initialParameters(),
+      ttl,
+    );
   }
 
   /**
@@ -276,6 +399,8 @@ export class ChainService {
           dustSecretKey,
           ledger.LedgerParameters.initialParameters().dust
         ),
+      // Use WASM prover with local key files for user-defined contract circuits
+      provingService: () => makeWasmProvingService({ keyMaterialProvider: makeLocalKeyMaterialProvider() }),
     });
 
     await facade.start(shieldedSecretKeys, dustSecretKey);
@@ -338,8 +463,8 @@ export class ChainService {
       issuerSecretKey: signedClaim.issuerSecretKey,
     };
 
-    const contractState = await this.queryContractState();
-    const context = this.buildCircuitContext(privateState, contractState);
+    const { ocrtState, ledgerState } = await this.queryContractState();
+    const context = this.buildCircuitContext(privateState, ocrtState);
 
     const circuitResults = this.contract!.circuits.mintBadge(
       context, claimType, subjectAddress, issuedAt, expiresAt,
@@ -348,13 +473,13 @@ export class ChainService {
     // Update cached context for subsequent calls
     this.lastCircuitContext = circuitResults.context;
 
-    const txId = await this.submitCircuitResult(circuitResults);
+    const txId = await this.submitCircuitResult("mintBadge", circuitResults, ledgerState);
     console.log(`  mintBadge tx submitted: ${txId}`);
 
     const elapsed = Date.now() - start;
 
-    // Read the updated badge count from the new context
-    const updatedState = readLedger(circuitResults.context.currentQueryContext as any);
+    // Read the updated badge count from the new context (must pass ChargedState, not QueryContext)
+    const updatedState = readLedger((circuitResults.context.currentQueryContext as any).state);
     const badgeId = updatedState.badge_count;
 
     return {
@@ -369,8 +494,8 @@ export class ChainService {
   async getLatestBadge(): Promise<Badge> {
     await this.init();
 
-    const state = await this.queryContractState();
-    const ledgerState: Ledger = readLedger(state);
+    const { ocrtState } = await this.queryContractState();
+    const ledgerState: Ledger = readLedger(ocrtState.data);
 
     return {
       claimType: Number(ledgerState.last_badge_claim_type),
@@ -397,8 +522,8 @@ export class ChainService {
   async getBadgeCount(): Promise<bigint> {
     await this.init();
 
-    const state = await this.queryContractState();
-    const ledgerState: Ledger = readLedger(state);
+    const { ocrtState } = await this.queryContractState();
+    const ledgerState: Ledger = readLedger(ocrtState.data);
     return ledgerState.badge_count;
   }
 
@@ -413,14 +538,14 @@ export class ChainService {
       issuerSecretKey: new Uint8Array(32),
     };
 
-    const contractState = await this.queryContractState();
-    const context = this.buildCircuitContext(privateState, contractState);
+    const { ocrtState, ledgerState } = await this.queryContractState();
+    const context = this.buildCircuitContext(privateState, ocrtState);
 
     const circuitResults = this.contract!.circuits.addIssuer(context, issuerPublicKey);
 
     this.lastCircuitContext = circuitResults.context;
 
-    const txId = await this.submitCircuitResult(circuitResults);
+    const txId = await this.submitCircuitResult("addIssuer", circuitResults, ledgerState);
     console.log(`  addIssuer tx submitted: ${txId}`);
   }
 
@@ -440,6 +565,15 @@ function hexToBytes32(hex: string): Uint8Array {
   const clean = hex.replace(/^0x/, "").padEnd(64, "0");
   const bytes = new Uint8Array(32);
   for (let i = 0; i < 32; i++) {
+    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/^0x/, "");
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
     bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
   }
   return bytes;
